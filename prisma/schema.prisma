@@ -1,0 +1,279 @@
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum JobStatus {
+  QUEUED
+  RESEARCHING
+  PLANNING
+  WRITING
+  VALIDATING_CODE
+  REVIEWING
+  COMPLETED
+  COMPLETED_WITH_WARNINGS
+  FAILED
+}
+
+enum ContentType {
+  BLOG
+  TUTORIAL
+}
+
+enum ToneType {
+  DIDACTIC
+  CONVERSATIONAL
+  ENTERPRISE_ARCHITECTURAL
+}
+
+enum OutboxStatus {
+  PENDING
+  PROCESSING
+  DISPATCHED
+  FAILED
+}
+
+enum WebhookDeliveryStatus {
+  PENDING
+  IN_FLIGHT
+  SUCCESS
+  FAILED_RETRYABLE
+  EXHAUSTED
+}
+
+enum IdempotencyStatus {
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+}
+
+model User {
+  id                  String               @id @db.Uuid // Mirrors Supabase Auth UID (auth.users.id)
+  email               String               @unique
+  name                String?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  
+  apiKeys             ApiKey[]
+  jobs                GenerationJob[]
+  articles            Article[]
+  webhookEndpoints    WebhookEndpoint[]
+  idempotencyRecords  IdempotencyRecord[]
+
+  @@map("users")
+}
+
+model ApiKey {
+  id               String            @id @default(uuid()) @db.Uuid
+  userId           String            @db.Uuid
+  name             String            // e.g., "Production Strapi Deployer"
+  keyPrefix        String            // First 16 chars for visual UI identification
+  keyHash          String            @unique // SHA-256 hash of plaintext key
+  scopes           String[]          @default(["generate:write", "generate:read", "articles:read"])
+  lastUsedAt       DateTime?
+  expiresAt        DateTime?
+  isActive         Boolean           @default(true)
+  requestCount     Int               @default(0)
+  createdAt        DateTime          @default(now())
+
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobs             GenerationJob[]
+
+  @@index([userId, isActive])
+  @@map("api_keys")
+}
+
+model GenerationJob {
+  id                   String            @id @default(uuid()) @db.Uuid
+  userId               String            @db.Uuid
+  apiKeyId             String?           @db.Uuid
+  threadId             String            @unique // LangGraph Checkpoint Thread ID
+  
+  // Generation Parameters
+  topic                String
+  contentType          ContentType       @default(TUTORIAL)
+  targetAudience       String            @default("Intermediate")
+  tone                 ToneType          @default(DIDACTIC)
+  targetWordCount      Int               @default(2500)
+  primaryLanguage      String?           // e.g., "TypeScript", "Rust", "Go"
+  frameworks           String[]          @default([])
+  additionalGuidelines String?           @db.Text
+  
+  // Execution Telemetry & Status
+  status               JobStatus         @default(QUEUED)
+  progress             Int               @default(0) // 0 to 100 percentage
+  revisionCount        Int               @default(0) // Loop guard counter (Max: 2)
+  errorMessage         String?
+  startedAt            DateTime?
+  completedAt          DateTime?
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+
+  user                 User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  apiKey               ApiKey?           @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
+  article              Article?
+  events               GenerationEvent[]
+  webhookDeliveries    WebhookDelivery[]
+
+  @@index([userId, status])
+  @@index([createdAt])
+  @@map("generation_jobs")
+}
+
+model GenerationEvent {
+  id             String            @id @default(uuid()) @db.Uuid
+  jobId          String            @db.Uuid
+  agentName      String            // "research" | "planning" | "writer" | "code_validator" | "reviewer"
+  eventType      String            // "NODE_STARTED" | "NODE_COMPLETED" | "NODE_FAILED" | "FEEDBACK_ISSUED"
+  stateSnapshot  Json?             // Intermediate state payload summary
+  inputTokens    Int?
+  outputTokens   Int?
+  durationMs     Int?
+  errorMessage   String?
+  createdAt      DateTime          @default(now())
+
+  job            GenerationJob     @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId, createdAt])
+  @@map("generation_events")
+}
+
+model Article {
+  id                 String            @id @default(uuid()) @db.Uuid
+  jobId              String            @unique @db.Uuid
+  userId             String            @db.Uuid // Direct ownership for fast queries & RLS
+  title              String
+  slug               String            @unique
+  summary            String
+  metaDescription    String
+  contentMarkdown    String            @db.Text
+  tags               String[]
+  qualityScore       Int
+  qualityReport      Json              // Full rubric evaluation breakdown & critique
+  groundingMetadata  Json?             // Grounding sources, URLs, citations & timestamps
+  wordCount          Int
+  readingTimeMinutes Int
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+
+  job                GenerationJob     @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  user               User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([slug])
+  @@map("articles")
+}
+
+model IdempotencyRecord {
+  id             String            @id @default(uuid()) @db.Uuid
+  userId         String            @db.Uuid
+  key            String            // Client-supplied Idempotency-Key header value
+  requestHash    String            // SHA-256 hash of deep canonical request JSON
+  ownershipToken String            @db.Uuid // Fencing token; regenerated on every lease acquire/reclaim
+  status         IdempotencyStatus @default(IN_PROGRESS)
+  statusCode     Int?              // Null while IN_PROGRESS
+  responseBody   Json?             // Null while IN_PROGRESS
+  leaseExpiresAt DateTime          // Reservation lease timeout (e.g., now() + 90s)
+  expiresAt      DateTime          // Retention TTL expiration (e.g., now() + 24 hours)
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  user           User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, key])
+  @@index([expiresAt])
+  @@index([status, leaseExpiresAt])
+  @@map("idempotency_records")
+}
+
+model OutboxEvent {
+  id             String            @id @default(uuid()) @db.Uuid
+  aggregateType  String            // "GenerationJob"
+  aggregateId    String            @db.Uuid // jobId
+  eventType      String            // "job.created" | "job.completed" | "job.failed"
+  payload        Json
+  status         OutboxStatus      @default(PENDING)
+  retryCount     Int               @default(0)
+  lockedAt       DateTime?
+  lockedBy       String?           // Dispatcher worker ID holding the lease
+  leaseExpiresAt DateTime?         // Dispatch lease timeout (e.g., lockedAt + 60s)
+  dispatchedAt   DateTime?
+  errorMessage   String?
+  createdAt      DateTime          @default(now())
+
+  deliveries     WebhookDelivery[]
+
+  @@index([status, leaseExpiresAt])
+  @@index([createdAt])
+  @@map("outbox_events")
+}
+
+model WebhookEndpoint {
+  id                    String            @id @default(uuid()) @db.Uuid
+  userId                String            @db.Uuid // User-scoped webhook subscription
+  url                   String            // Target HTTPS URL
+  
+  // Primary Signing Secret (AES-256-GCM)
+  secretCiphertext      String
+  secretIv              String
+  secretTag             String
+  
+  // Secondary Rotating Secret (AES-256-GCM)
+  nextSecretCiphertext  String?
+  nextSecretIv          String?
+  nextSecretTag         String?
+  nextSecretExpiresAt   DateTime?
+  
+  description           String?
+  eventTypes            String[]          @default(["job.completed", "job.failed"])
+  isActive              Boolean           @default(true)
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  user                  User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deliveries            WebhookDelivery[]
+
+  @@index([userId, isActive])
+  @@map("webhook_endpoints")
+}
+
+model WebhookDelivery {
+  id               String                @id @default(uuid()) @db.Uuid
+  deliveryId       String                @unique @default(uuid()) @db.Uuid // Stable idempotency token sent in HTTP header
+  outboxEventId    String                @db.Uuid
+  webhookId        String                @db.Uuid
+  jobId            String                @db.Uuid
+  eventType        String                // "job.completed" | "job.failed"
+  payload          Json
+  httpStatus       Int?
+  responseBody     String?               @db.VarChar(4096) // Capped at 4KB to prevent DB bloat
+  errorMessage     String?
+  attemptCount     Int                   @default(0)
+  maxAttempts      Int                   @default(3)
+  status           WebhookDeliveryStatus @default(PENDING)
+  claimToken       String?               @db.Uuid // Unique per-claim ownership token; regenerated on every claim
+  lockedAt         DateTime?
+  lockedBy         String?               // Dispatcher worker holding the delivery lease
+  leaseExpiresAt   DateTime?             // Delivery lease expiration
+  scheduledAt      DateTime              @default(now())
+  attemptedAt      DateTime?
+  completedAt      DateTime?
+  nextRetryAt      DateTime?
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+
+  outboxEvent      OutboxEvent           @relation(fields: [outboxEventId], references: [id], onDelete: Cascade)
+  webhook          WebhookEndpoint       @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+  job              GenerationJob         @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([outboxEventId, webhookId]) // Stable delivery guarantee per endpoint & event
+  @@index([webhookId, status])
+  @@index([status, nextRetryAt, leaseExpiresAt])
+  @@index([jobId])
+  @@map("webhook_deliveries")
+}
