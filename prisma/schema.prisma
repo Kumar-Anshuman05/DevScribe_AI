@@ -208,6 +208,7 @@ model OutboxEvent {
 
   deliveries     WebhookDelivery[]
 
+  @@unique([aggregateId, eventType])
   @@index([status, leaseExpiresAt])
   @@index([createdAt])
   @@map("outbox_events")

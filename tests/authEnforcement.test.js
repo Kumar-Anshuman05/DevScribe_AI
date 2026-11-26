@@ -1,6 +1,28 @@
 const test = require("node:test");
 const assert = require("node:assert");
 
+// Import actual production API key utilities from src/lib/auth/apiKey
+let hashApiKey;
+let generateApiKey;
+
+test.before(async () => {
+  const mod = await import("@/lib/auth/apiKey");
+  hashApiKey = mod.hashApiKey;
+  generateApiKey = mod.generateApiKey;
+});
+
+test("API Key Hashing (Production Module): SHA-256 hash generation is deterministic and unique", () => {
+  const { plaintextKey, keyPrefix, keyHash } = generateApiKey();
+
+  assert.ok(plaintextKey.startsWith("ds_live_"));
+  assert.strictEqual(keyPrefix, plaintextKey.slice(0, 16));
+  assert.strictEqual(keyHash, hashApiKey(plaintextKey));
+
+  // Different keys generate different hashes
+  const key2 = generateApiKey();
+  assert.notStrictEqual(key2.keyHash, keyHash);
+});
+
 test("Authentication Enforcement: Unauthenticated requests are rejected with 401 without findFirst fallback", () => {
   function resolveUserSession(session) {
     if (!session || !session.user || !session.user.id) {
@@ -50,7 +72,6 @@ test("Resource Ownership Enforcement: Cross-user resource access is rejected wit
 });
 
 test("Independent API Route Authorization: Does not rely on middleware alone", () => {
-  // Simulates an API route handler invoked directly without middleware
   function apiRouteHandler(headers, session) {
     const authHeader = headers.authorization;
     if (authHeader && authHeader.startsWith("Bearer ds_live_")) {
@@ -76,18 +97,6 @@ test("Independent API Route Authorization: Does not rely on middleware alone", (
   const res3 = apiRouteHandler({ authorization: "Bearer ds_live_abcdef123456" }, null);
   assert.strictEqual(res3.authenticated, true);
   assert.strictEqual(res3.authType, "api_key");
-});
-
-test("Dashboard Layout Protection: Server-side redirect for unauthenticated visitors", () => {
-  function checkDashboardAccess(user) {
-    if (!user) {
-      return { redirect: "/login" };
-    }
-    return { render: true };
-  }
-
-  assert.deepStrictEqual(checkDashboardAccess(null), { redirect: "/login" });
-  assert.deepStrictEqual(checkDashboardAccess({ id: "user_123" }), { render: true });
 });
 
 test("Cross-User Article Access: Query is scoped strictly by authenticated userId", () => {

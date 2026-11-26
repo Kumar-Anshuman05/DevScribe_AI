@@ -55,7 +55,7 @@ export default function SignUpPage() {
           </div>
           <h1 className="text-2xl font-bold tracking-tight">Create your account</h1>
           <p className="text-xs text-muted-foreground">
-            Get started with DevScribe AI's multi-agent authoring engine
+            Get started with DevScribe AI&apos;s multi-agent authoring engine
           </p>
         </div>
 
@@ -69,7 +69,7 @@ export default function SignUpPage() {
         {success ? (
           <div className="p-4 bg-emerald-500/10 border border-emerald-500/20 rounded-md text-xs text-emerald-600 dark:text-emerald-400 space-y-2">
             <p className="font-semibold">Check your email for confirmation!</p>
-            <p>We've sent a verification link to {email}. Verify your email to begin generating articles.</p>
+            <p>We&apos;ve sent a verification link to {email}. Verify your email to begin generating articles.</p>
             <div className="pt-2">
               <Link href="/login">
                 <Button size="sm" variant="outline" className="w-full">

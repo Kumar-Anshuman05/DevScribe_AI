@@ -1,6 +1,7 @@
 import dns from "dns";
 import http from "http";
 import https from "https";
+import net from "net";
 import { URL } from "url";
 import { decryptWebhookSecret, signWebhookPayload } from "./crypto";
 
@@ -38,6 +39,8 @@ export interface WebhookHttpResult {
  * - RFC 4291 Link-Local IPv6 (fe80::/10)
  * - IPv6 Multicast (ff00::/8)
  * - IPv4-mapped IPv6 (::ffff:0:0/96, ::ffff:127.0.0.1, etc.)
+ * - 6to4 Relay Anycast (192.88.99.0/24, 2002::/16)
+ * - Discard & Documentation (100::/64, 2001:db8::/32, 198.51.100.0/24, 203.0.113.0/24)
  */
 export function isPrivateOrReservedIp(ip: string): boolean {
   if (!ip || typeof ip !== "string") {
@@ -46,57 +49,95 @@ export function isPrivateOrReservedIp(ip: string): boolean {
 
   const trimmed = ip.trim();
 
-  // Handle IPv4-mapped IPv6 (e.g. "::ffff:127.0.0.1" or "::ffff:7f00:1")
-  if (trimmed.toLowerCase().startsWith("::ffff:")) {
-    const v4Part = trimmed.slice(7);
-    if (v4Part.includes(".")) {
-      return isPrivateOrReservedIp(v4Part);
+  // Validate format using Node's net module
+  const ipFamily = net.isIP(trimmed);
+  if (ipFamily === 0) {
+    // Check if it's an IPv4-mapped IPv6 formatted with dots, e.g. "::ffff:127.0.0.1"
+    if (trimmed.toLowerCase().startsWith("::ffff:")) {
+      const v4Part = trimmed.slice(7);
+      if (net.isIP(v4Part) === 4) {
+        return isPrivateOrReservedIp(v4Part);
+      }
     }
+    return true;
   }
 
-  // IPv4 checks
-  if (trimmed.includes(".")) {
+  // IPv4 Checks
+  if (ipFamily === 4) {
     const parts = trimmed.split(".").map(Number);
     if (parts.length !== 4 || parts.some((p) => isNaN(p) || p < 0 || p > 255)) {
       return true;
     }
-    // Loopback (127.0.0.0/8)
-    if (parts[0] === 127) return true;
-    // Unroutable / "This host" (0.0.0.0/8)
+
+    // 0.0.0.0/8 - Unroutable / "This host on this network"
     if (parts[0] === 0) return true;
-    // Private (10.0.0.0/8)
+
+    // 10.0.0.0/8 - RFC 1918 Private
     if (parts[0] === 10) return true;
-    // Carrier-Grade NAT (100.64.0.0/10: 100.64.0.0 - 100.127.255.255)
+
+    // 100.64.0.0/10 - RFC 6598 Carrier-Grade NAT (100.64.0.0 - 100.127.255.255)
     if (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127) return true;
-    // Link-local & Cloud Metadata (169.254.0.0/16, including 169.254.169.254)
+
+    // 127.0.0.0/8 - Loopback
+    if (parts[0] === 127) return true;
+
+    // 169.254.0.0/16 - RFC 3927 Link-local & Cloud Metadata (169.254.169.254)
     if (parts[0] === 169 && parts[1] === 254) return true;
-    // Private (172.16.0.0/12: 172.16.0.0 - 172.31.255.255)
+
+    // 172.16.0.0/12 - RFC 1918 Private (172.16.0.0 - 172.31.255.255)
     if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
-    // IETF Protocol Assignments (192.0.0.0/24) & TEST-NET-1 (192.0.2.0/24)
-    if (parts[0] === 192 && parts[1] === 0 && (parts[2] === 0 || parts[2] === 2)) return true;
-    // Private (192.168.0.0/16)
+
+    // 192.0.0.0/24 - IETF Protocol Assignments
+    if (parts[0] === 192 && parts[1] === 0 && parts[2] === 0) return true;
+
+    // 192.0.2.0/24 - TEST-NET-1 Documentation
+    if (parts[0] === 192 && parts[1] === 0 && parts[2] === 2) return true;
+
+    // 192.88.99.0/24 - 6to4 Relay Anycast
+    if (parts[0] === 192 && parts[1] === 88 && parts[2] === 99) return true;
+
+    // 192.168.0.0/16 - RFC 1918 Private
     if (parts[0] === 192 && parts[1] === 168) return true;
-    // Benchmark testing (198.18.0.0/15: 198.18.0.0 - 198.19.255.255)
+
+    // 198.18.0.0/15 - Network Benchmark Testing (198.18.0.0 - 198.19.255.255)
     if (parts[0] === 198 && (parts[1] === 18 || parts[1] === 19)) return true;
-    // TEST-NET-2 (198.51.100.0/24)
+
+    // 198.51.100.0/24 - TEST-NET-2 Documentation
     if (parts[0] === 198 && parts[1] === 51 && parts[2] === 100) return true;
-    // TEST-NET-3 (203.0.113.0/24)
+
+    // 203.0.113.0/24 - TEST-NET-3 Documentation
     if (parts[0] === 203 && parts[1] === 0 && parts[2] === 113) return true;
-    // Multicast (224.0.0.0/4: 224.0.0.0 - 239.255.255.255)
+
+    // 224.0.0.0/4 - RFC 5771 Multicast (224.0.0.0 - 239.255.255.255)
     if (parts[0] >= 224 && parts[0] <= 239) return true;
-    // Reserved / Broadcast (240.0.0.0/4)
+
+    // 240.0.0.0/4 - RFC 1112 Reserved / Broadcast
     if (parts[0] >= 240) return true;
+
+    return false;
   }
 
-  // IPv6 checks
-  if (trimmed.includes(":")) {
+  // IPv6 Checks
+  if (ipFamily === 6) {
     const normalized = trimmed.toLowerCase();
+
+    // Check for IPv4-mapped IPv6 (::ffff:x.x.x.x)
+    if (normalized.startsWith("::ffff:")) {
+      const v4Part = normalized.slice(7);
+      if (net.isIP(v4Part) === 4) {
+        return isPrivateOrReservedIp(v4Part);
+      }
+    }
+
     // Unspecified (::)
     if (normalized === "::" || normalized === "0:0:0:0:0:0:0:0") return true;
+
     // Loopback (::1)
     if (normalized === "::1" || normalized === "0:0:0:0:0:0:0:1") return true;
+
     // Unique Local Address (fc00::/7: fc00:: - fdff:ffff:...)
     if (normalized.startsWith("fc") || normalized.startsWith("fd")) return true;
+
     // Link-Local Unicast (fe80::/10: fe80:: - febf:ffff:...)
     if (
       normalized.startsWith("fe8") ||
@@ -106,20 +147,29 @@ export function isPrivateOrReservedIp(ip: string): boolean {
     ) {
       return true;
     }
+
     // Multicast (ff00::/8)
     if (normalized.startsWith("ff")) return true;
+
     // Discard prefix (100::/64)
     if (normalized.startsWith("100:")) return true;
+
     // Documentation prefix (2001:db8::/32)
     if (normalized.startsWith("2001:db8:") || normalized.startsWith("2001:0db8:")) return true;
+
+    // 6to4 prefix (2002::/16)
+    if (normalized.startsWith("2002:")) return true;
+
+    return false;
   }
 
-  return false;
+  return true;
 }
 
 /**
  * Validates every resolved A and AAAA address against the SSRF denylist.
  * Rejects the entire hostname if ANY resolved address is private, loopback, or metadata.
+ * Universal Denylist: in production (process.env.NODE_ENV === "production"), allowLocal is ignored.
  */
 export function validateAllResolvedIps(
   lookupResults: Array<{ address: string; family?: number }>,
@@ -129,7 +179,10 @@ export function validateAllResolvedIps(
     return { isValid: false, blockedIp: "empty_records" };
   }
 
-  if (allowLocal) {
+  const isProduction = process.env.NODE_ENV === "production";
+  const effectiveAllowLocal = isProduction ? false : allowLocal;
+
+  if (effectiveAllowLocal) {
     return { isValid: true };
   }
 
@@ -169,7 +222,7 @@ export function createPinnedLookup(resolvedIp: string) {
 /**
  * Dispatches an outbound webhook HTTP POST request with multi-address DNS validation,
  * socket pinning anti-SSRF protection, dual-secret rotation headers, stable delivery ID,
- * 5s timeout, and 4KB body cap.
+ * 5s timeout, redirect prohibition, and 4KB body cap.
  */
 export async function sendWebhookHttp(params: SendWebhookHttpParams): Promise<WebhookHttpResult> {
   const parsedUrl = new URL(params.url);
@@ -209,8 +262,9 @@ export async function sendWebhookHttp(params: SendWebhookHttpParams): Promise<We
     };
   }
 
-  // Reject the hostname if ANY resolved address is private, reserved, loopback, or metadata
-  const allowLocal = process.env.ALLOW_LOCAL_WEBHOOKS === "true";
+  // Universal SSRF denylist: even if ALLOW_LOCAL_WEBHOOKS=true is set, never bypass in production
+  const isProduction = process.env.NODE_ENV === "production";
+  const allowLocal = !isProduction && process.env.ALLOW_LOCAL_WEBHOOKS === "true";
   const validation = validateAllResolvedIps(lookupResults, allowLocal);
   if (!validation.isValid) {
     return {
@@ -257,7 +311,7 @@ export async function sendWebhookHttp(params: SendWebhookHttpParams): Promise<We
     }
   }
 
-  // 5. Send HTTP POST request with DNS socket pinning, 5,000ms timeout, and SNI preservation
+  // 5. Send HTTP POST request with DNS socket pinning, 5,000ms timeout, redirect blocking, and SNI preservation
   return new Promise<WebhookHttpResult>((resolve) => {
     const isHttps = parsedUrl.protocol === "https:";
     const transport = isHttps ? https : http;
@@ -289,6 +343,17 @@ export async function sendWebhookHttp(params: SendWebhookHttpParams): Promise<We
 
       res.on("end", () => {
         const httpStatus = res.statusCode || 0;
+
+        // Block HTTP redirects to eliminate SSRF redirect bypass vectors
+        if (httpStatus >= 300 && httpStatus < 400) {
+          resolve({
+            isSuccess: false,
+            httpStatus,
+            errorMessage: `SSRF_REDIRECT_PROHIBITED: HTTP redirect (${httpStatus}) received. Automatic redirects are disabled to prevent SSRF bypass attacks.`,
+          });
+          return;
+        }
+
         const isSuccess = httpStatus >= 200 && httpStatus < 300;
         resolve({
           isSuccess,

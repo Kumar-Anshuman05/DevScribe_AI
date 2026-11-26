@@ -59,11 +59,19 @@ export const structuredOutlineSchema = z.object({
   sections: z.array(outlineSectionSchema).min(1, "Outline must contain at least one section"),
 });
 
+export type CodeValidationType =
+  | "BABEL_AST"
+  | "JSON_PARSE"
+  | "YAML_PARSE"
+  | "DELIMITER_CHECK_ONLY"
+  | "UNVALIDATED";
+
 export interface CodeBlockItem {
   language: string;
   code: string;
   isValid?: boolean;
   errors?: string[];
+  validationType?: CodeValidationType;
 }
 
 export interface CodeValidationResult {

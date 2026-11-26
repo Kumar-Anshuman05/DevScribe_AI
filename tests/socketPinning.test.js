@@ -1,86 +1,19 @@
 const test = require("node:test");
 const assert = require("node:assert");
 
-// Re-implement the exact logic from src/lib/webhooks/httpClient.ts for unit verification
-function isPrivateOrReservedIp(ip) {
-  if (!ip || typeof ip !== "string") return true;
-  const trimmed = ip.trim();
+// Import actual production functions directly from src/lib/webhooks/httpClient
+let isPrivateOrReservedIp;
+let validateAllResolvedIps;
+let createPinnedLookup;
 
-  if (trimmed.toLowerCase().startsWith("::ffff:")) {
-    const v4Part = trimmed.slice(7);
-    if (v4Part.includes(".")) {
-      return isPrivateOrReservedIp(v4Part);
-    }
-  }
+test.before(async () => {
+  const mod = await import("@/lib/webhooks/httpClient");
+  isPrivateOrReservedIp = mod.isPrivateOrReservedIp;
+  validateAllResolvedIps = mod.validateAllResolvedIps;
+  createPinnedLookup = mod.createPinnedLookup;
+});
 
-  if (trimmed.includes(".")) {
-    const parts = trimmed.split(".").map(Number);
-    if (parts.length !== 4 || parts.some((p) => isNaN(p) || p < 0 || p > 255)) return true;
-    if (parts[0] === 127) return true; // Loopback
-    if (parts[0] === 0) return true; // Unroutable
-    if (parts[0] === 10) return true; // RFC 1918 Private
-    if (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127) return true; // RFC 6598 Carrier-Grade NAT
-    if (parts[0] === 169 && parts[1] === 254) return true; // Link-local & Metadata
-    if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true; // RFC 1918 Private
-    if (parts[0] === 192 && parts[1] === 0 && (parts[2] === 0 || parts[2] === 2)) return true; // IETF & TEST-NET-1
-    if (parts[0] === 192 && parts[1] === 168) return true; // RFC 1918 Private
-    if (parts[0] === 198 && (parts[1] === 18 || parts[1] === 19)) return true; // Benchmark
-    if (parts[0] === 198 && parts[1] === 51 && parts[2] === 100) return true; // TEST-NET-2
-    if (parts[0] === 203 && parts[1] === 0 && parts[2] === 113) return true; // TEST-NET-3
-    if (parts[0] >= 224 && parts[0] <= 239) return true; // Multicast
-    if (parts[0] >= 240) return true; // Reserved / Broadcast
-  }
-
-  if (trimmed.includes(":")) {
-    const normalized = trimmed.toLowerCase();
-    if (normalized === "::" || normalized === "0:0:0:0:0:0:0:0") return true;
-    if (normalized === "::1" || normalized === "0:0:0:0:0:0:0:1") return true;
-    if (normalized.startsWith("fc") || normalized.startsWith("fd")) return true; // Unique Local
-    if (
-      normalized.startsWith("fe8") ||
-      normalized.startsWith("fe9") ||
-      normalized.startsWith("fea") ||
-      normalized.startsWith("feb")
-    ) return true; // Link-Local
-    if (normalized.startsWith("ff")) return true; // Multicast
-    if (normalized.startsWith("100:")) return true; // Discard
-    if (normalized.startsWith("2001:db8:") || normalized.startsWith("2001:0db8:")) return true; // Documentation
-  }
-
-  return false;
-}
-
-function validateAllResolvedIps(lookupResults, allowLocal = false) {
-  if (!lookupResults || lookupResults.length === 0) {
-    return { isValid: false, blockedIp: "empty_records" };
-  }
-  if (allowLocal) {
-    return { isValid: true };
-  }
-  for (const record of lookupResults) {
-    if (isPrivateOrReservedIp(record.address)) {
-      return { isValid: false, blockedIp: record.address };
-    }
-  }
-  return { isValid: true };
-}
-
-function createPinnedLookup(resolvedIp) {
-  const isIpv6 = resolvedIp.includes(":");
-  const ipFamily = isIpv6 ? 6 : 4;
-
-  return (_hostname, options, callback) => {
-    const cb = typeof options === "function" ? options : callback;
-    const isAll = typeof options === "object" && options !== null && options.all;
-    if (isAll) {
-      cb(null, [{ address: resolvedIp, family: ipFamily }]);
-    } else {
-      cb(null, resolvedIp, ipFamily);
-    }
-  };
-}
-
-test("Multi-Address DNS Validation: Rejects mixed public and private A records", () => {
+test("Multi-Address DNS Validation (Production Module): Rejects mixed public and private A records", () => {
   const mixedRecords = [
     { address: "93.184.216.34", family: 4 }, // Public (example.com)
     { address: "127.0.0.1", family: 4 },     // Prohibited Loopback
@@ -91,7 +24,7 @@ test("Multi-Address DNS Validation: Rejects mixed public and private A records",
   assert.strictEqual(result.blockedIp, "127.0.0.1");
 });
 
-test("Multi-Address DNS Validation: Rejects dual-stack with public IPv4 and link-local/loopback IPv6", () => {
+test("Multi-Address DNS Validation (Production Module): Rejects dual-stack with public IPv4 and loopback/metadata", () => {
   const dualStackAttacker = [
     { address: "104.244.42.1", family: 4 }, // Public IPv4
     { address: "::1", family: 6 },          // Prohibited IPv6 Loopback
@@ -110,7 +43,7 @@ test("Multi-Address DNS Validation: Rejects dual-stack with public IPv4 and link
   assert.strictEqual(result2.blockedIp, "169.254.169.254");
 });
 
-test("Multi-Address DNS Validation: Permits multiple legitimate public addresses", () => {
+test("Multi-Address DNS Validation (Production Module): Permits multiple legitimate public addresses", () => {
   const publicRecords = [
     { address: "140.82.121.3", family: 4 },
     { address: "140.82.121.4", family: 4 },
@@ -122,7 +55,7 @@ test("Multi-Address DNS Validation: Permits multiple legitimate public addresses
   assert.strictEqual(result.blockedIp, undefined);
 });
 
-test("Socket Pinning: Custom lookup pins to resolved IP and prevents DNS rebinding", (t, done) => {
+test("Socket Pinning (Production Module): Custom lookup pins to resolved IP and prevents DNS rebinding", (t, done) => {
   const targetIp = "93.184.216.34";
   const pinnedLookup = createPinnedLookup(targetIp);
 
@@ -135,7 +68,7 @@ test("Socket Pinning: Custom lookup pins to resolved IP and prevents DNS rebindi
   });
 });
 
-test("Socket Pinning: Custom lookup handles IPv6 and options.all correctly", (t, done) => {
+test("Socket Pinning (Production Module): Custom lookup handles IPv6 and options.all correctly", (t, done) => {
   const targetIpv6 = "2607:f8b0:4005:805::200e";
   const pinnedLookup = createPinnedLookup(targetIpv6);
 
@@ -148,7 +81,7 @@ test("Socket Pinning: Custom lookup handles IPv6 and options.all correctly", (t,
   });
 });
 
-test("Anti-SSRF Denylist: Comprehensive IPv4 coverage", () => {
+test("Anti-SSRF Denylist (Production Module): Comprehensive IPv4 coverage", () => {
   // Loopback
   assert.strictEqual(isPrivateOrReservedIp("127.0.0.1"), true);
   assert.strictEqual(isPrivateOrReservedIp("127.255.255.255"), true);
@@ -182,7 +115,7 @@ test("Anti-SSRF Denylist: Comprehensive IPv4 coverage", () => {
   assert.strictEqual(isPrivateOrReservedIp("140.82.121.4"), false);
 });
 
-test("Anti-SSRF Denylist: Comprehensive IPv6 coverage", () => {
+test("Anti-SSRF Denylist (Production Module): Comprehensive IPv6 coverage", () => {
   // Loopback and unspecified
   assert.strictEqual(isPrivateOrReservedIp("::1"), true);
   assert.strictEqual(isPrivateOrReservedIp("::"), true);

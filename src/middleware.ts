@@ -8,8 +8,21 @@ export async function middleware(request: NextRequest) {
     },
   });
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "https://mock.supabase.co";
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "mock-anon-key";
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  const isDashboardRoute = request.nextUrl.pathname.startsWith("/dashboard");
+  const isAuthRoute =
+    request.nextUrl.pathname === "/login" || request.nextUrl.pathname === "/signup";
+
+  if (!supabaseUrl || !supabaseAnonKey) {
+    if (isDashboardRoute) {
+      const redirectUrl = new URL("/login", request.url);
+      redirectUrl.searchParams.set("error", "missing_supabase_configuration");
+      return NextResponse.redirect(redirectUrl);
+    }
+    return response;
+  }
 
   const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {
     cookies: {
@@ -31,10 +44,6 @@ export async function middleware(request: NextRequest) {
   const {
     data: { user },
   } = await supabase.auth.getUser();
-
-  const isDashboardRoute = request.nextUrl.pathname.startsWith("/dashboard");
-  const isAuthRoute =
-    request.nextUrl.pathname === "/login" || request.nextUrl.pathname === "/signup";
 
   // Enforce authentication on protected dashboard routes
   if (isDashboardRoute && !user) {

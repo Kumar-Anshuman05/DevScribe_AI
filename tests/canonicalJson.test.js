@@ -1,43 +1,17 @@
 const test = require("node:test");
 const assert = require("node:assert");
-const crypto = require("node:crypto");
 
-// Deep canonical JSON serializer
-function canonicalJsonStringify(value) {
-  if (value === null || typeof value !== "object") {
-    if (typeof value === "undefined" || typeof value === "function" || typeof value === "symbol") {
-      throw new Error("Payload contains non-serializable value");
-    }
-    return JSON.stringify(value);
-  }
+// Import actual production canonical JSON serializer directly from src/lib/idempotency/canonicalJson
+let canonicalJsonStringify;
+let computeCanonicalRequestHash;
 
-  if (Array.isArray(value)) {
-    const serializedElements = value.map((element) => canonicalJsonStringify(element));
-    return `[${serializedElements.join(",")}]`;
-  }
+test.before(async () => {
+  const mod = await import("@/lib/idempotency/canonicalJson");
+  canonicalJsonStringify = mod.canonicalJsonStringify;
+  computeCanonicalRequestHash = mod.computeCanonicalRequestHash;
+});
 
-  const obj = value;
-  const sortedKeys = Object.keys(obj).sort();
-  const serializedEntries = [];
-
-  for (const key of sortedKeys) {
-    const val = obj[key];
-    if (val === undefined || typeof val === "function" || typeof val === "symbol") {
-      continue;
-    }
-    const serializedVal = canonicalJsonStringify(val);
-    serializedEntries.push(`${JSON.stringify(key)}:${serializedVal}`);
-  }
-
-  return `{${serializedEntries.join(",")}}`;
-}
-
-function computeCanonicalRequestHash(payload) {
-  const canonicalString = canonicalJsonStringify(payload);
-  return crypto.createHash("sha256").update(canonicalString, "utf8").digest("hex");
-}
-
-test("Canonical JSON: Identical hash for scrambled key order", () => {
+test("Canonical JSON (Production Module): Identical hash for scrambled key order", () => {
   const payloadA = {
     topic: "Distributed Systems",
     targetWordCount: 2500,
@@ -59,7 +33,7 @@ test("Canonical JSON: Identical hash for scrambled key order", () => {
   assert.strictEqual(computeCanonicalRequestHash(payloadA), computeCanonicalRequestHash(payloadB));
 });
 
-test("Canonical JSON: Preserves array ordering", () => {
+test("Canonical JSON (Production Module): Preserves array ordering", () => {
   const arr1 = { items: [1, 2, 3] };
   const arr2 = { items: [3, 2, 1] };
 
@@ -67,8 +41,11 @@ test("Canonical JSON: Preserves array ordering", () => {
   assert.notStrictEqual(computeCanonicalRequestHash(arr1), computeCanonicalRequestHash(arr2));
 });
 
-test("Canonical JSON: Rejects undefined and function values", () => {
+test("Canonical JSON (Production Module): Rejects undefined and non-serializable values", () => {
   assert.throws(() => {
     canonicalJsonStringify(undefined);
+  });
+  assert.throws(() => {
+    canonicalJsonStringify(() => {});
   });
 });

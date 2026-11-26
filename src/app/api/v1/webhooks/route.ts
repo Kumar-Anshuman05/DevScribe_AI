@@ -2,31 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import crypto from "crypto";
 import prisma from "@/lib/prisma";
-import { authenticateApiKey } from "@/lib/auth/apiKey";
-import { createClient } from "@/lib/supabase/server";
+import { resolveUserAuth } from "@/lib/auth/resolveAuth";
 import { encryptWebhookSecret } from "@/lib/webhooks/crypto";
 import { ApiError } from "@/lib/api/error";
-
-async function resolveUserAuth(req: NextRequest, requiredScope: string) {
-  const authHeader = req.headers.get("authorization");
-  if (authHeader && authHeader.toLowerCase().startsWith("bearer ds_live_")) {
-    const apiAuth = await authenticateApiKey(authHeader, requiredScope);
-    if (!apiAuth.isValid) {
-      throw new ApiError(401, "UNAUTHORIZED", `API Key invalid: ${apiAuth.error}`);
-    }
-    return { userId: apiAuth.userId! };
-  }
-
-  try {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    if (user) {
-      return { userId: user.id };
-    }
-  } catch {}
-
-  throw new ApiError(401, "UNAUTHORIZED", "Missing credentials.");
-}
 
 const webhookSchema = z.object({
   url: z.string().url("Valid HTTPS URL required").refine((u) => u.startsWith("https://") || process.env.NODE_ENV !== "production", {

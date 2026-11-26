@@ -106,7 +106,7 @@ function LoginForm() {
       </form>
 
       <div className="text-center text-xs text-muted-foreground pt-2 border-t border-border">
-        Don't have an account?{" "}
+        Don&apos;t have an account?{" "}
         <Link href="/signup" className="text-primary hover:underline font-medium">
           Create account
         </Link>

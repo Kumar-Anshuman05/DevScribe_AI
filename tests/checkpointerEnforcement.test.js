@@ -1,55 +1,38 @@
 const test = require("node:test");
 const assert = require("node:assert");
 
-test("Checkpointer Enforcement: Throws CHECKPOINTER_CONFIGURATION_ERROR when DB connection is absent", async () => {
-  function getSafeCheckpointer(env) {
-    const connectionString =
-      env.CHECKPOINTER_DATABASE_URL ||
-      env.DIRECT_URL ||
-      env.DATABASE_URL;
+// Import actual production checkpointer directly from src/lib/agents/checkpointer
+let getSafeCheckpointer;
 
-    if (!connectionString) {
-      throw new Error(
-        "CHECKPOINTER_CONFIGURATION_ERROR: Durable PostgreSQL checkpointer connection string is missing. " +
-        "Configure CHECKPOINTER_DATABASE_URL, DIRECT_URL, or DATABASE_URL in environment variables."
-      );
-    }
-    return { pool: connectionString };
-  }
-
-  // With no database URL configured:
-  assert.throws(
-    () => {
-      getSafeCheckpointer({});
-    },
-    {
-      name: "Error",
-      message: /CHECKPOINTER_CONFIGURATION_ERROR.*Durable PostgreSQL checkpointer connection string is missing/,
-    }
-  );
-
-  // Does NOT fall back to in-memory checkpointer or return null
-  try {
-    getSafeCheckpointer({});
-    assert.fail("Should have thrown CHECKPOINTER_CONFIGURATION_ERROR");
-  } catch (err) {
-    assert.strictEqual(err.message.includes("CHECKPOINTER_CONFIGURATION_ERROR"), true);
-  }
+test.before(async () => {
+  const mod = await import("@/lib/agents/checkpointer");
+  getSafeCheckpointer = mod.getSafeCheckpointer;
 });
 
-test("Checkpointer Enforcement: Successfully initializes when connection string is provided", () => {
-  function getSafeCheckpointer(env) {
-    const connectionString =
-      env.CHECKPOINTER_DATABASE_URL ||
-      env.DIRECT_URL ||
-      env.DATABASE_URL;
+test("Checkpointer Enforcement (Production Module): Throws CHECKPOINTER_CONFIGURATION_ERROR when DB connection is absent", async () => {
+  // Save original env
+  const origCheckpointer = process.env.CHECKPOINTER_DATABASE_URL;
+  const origDirect = process.env.DIRECT_URL;
+  const origDb = process.env.DATABASE_URL;
 
-    if (!connectionString) {
-      throw new Error("CHECKPOINTER_CONFIGURATION_ERROR: Missing connection string");
-    }
-    return { connected: true, connectionString };
+  delete process.env.CHECKPOINTER_DATABASE_URL;
+  delete process.env.DIRECT_URL;
+  delete process.env.DATABASE_URL;
+
+  try {
+    await assert.rejects(
+      async () => {
+        await getSafeCheckpointer();
+      },
+      {
+        name: "Error",
+        message: /CHECKPOINTER_CONFIGURATION_ERROR.*Durable PostgreSQL checkpointer connection string is missing/,
+      }
+    );
+  } finally {
+    // Restore env
+    if (origCheckpointer) process.env.CHECKPOINTER_DATABASE_URL = origCheckpointer;
+    if (origDirect) process.env.DIRECT_URL = origDirect;
+    if (origDb) process.env.DATABASE_URL = origDb;
   }
-
-  const result = getSafeCheckpointer({ DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/devscribe" });
-  assert.strictEqual(result.connected, true);
 });

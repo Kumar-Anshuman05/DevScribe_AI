@@ -1,32 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { authenticateApiKey } from "@/lib/auth/apiKey";
-import { createClient } from "@/lib/supabase/server";
+import { resolveUserAuth } from "@/lib/auth/resolveAuth";
 import { ApiError } from "@/lib/api/error";
-
-async function resolveUserAuth(req: NextRequest, requiredScope: string) {
-  const authHeader = req.headers.get("authorization");
-
-  if (authHeader && authHeader.toLowerCase().startsWith("bearer ds_live_")) {
-    const apiAuth = await authenticateApiKey(authHeader, requiredScope);
-    if (!apiAuth.isValid) {
-      throw new ApiError(401, "UNAUTHORIZED", `API Key invalid: ${apiAuth.error}`);
-    }
-    return { userId: apiAuth.userId! };
-  }
-
-  try {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    if (user) {
-      return { userId: user.id };
-    }
-  } catch {
-    // Cookie auth unavailable
-  }
-
-  throw new ApiError(401, "UNAUTHORIZED", "Missing or invalid credentials.");
-}
 
 /**
  * GET /api/v1/jobs/[id] — Poll Live Job Telemetry & Execution Events

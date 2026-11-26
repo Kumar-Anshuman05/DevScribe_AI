@@ -1,66 +1,19 @@
 const test = require("node:test");
 const assert = require("node:assert");
-const { parse: babelParse } = require("@babel/parser");
-const yaml = require("yaml");
 
-function validateCodeBlock(language, code) {
-  const normalizedLang = language.toLowerCase();
-  const errors = [];
+// Import actual production code validator directly from src/lib/agents/codeValidator
+let validateCodeBlock;
+let validateArticleCode;
+let extractCodeBlocksFromMarkdown;
 
-  if (["typescript", "ts", "javascript", "js", "tsx", "jsx"].includes(normalizedLang)) {
-    try {
-      babelParse(code, {
-        sourceType: "module",
-        plugins: ["typescript", "jsx"],
-      });
-      return { isValid: true, errors: [] };
-    } catch (err) {
-      errors.push(err.message);
-      return { isValid: false, errors };
-    }
-  }
+test.before(async () => {
+  const mod = await import("@/lib/agents/codeValidator");
+  validateCodeBlock = mod.validateCodeBlock;
+  validateArticleCode = mod.validateArticleCode;
+  extractCodeBlocksFromMarkdown = mod.extractCodeBlocksFromMarkdown;
+});
 
-  if (["json"].includes(normalizedLang)) {
-    try {
-      JSON.parse(code);
-      return { isValid: true, errors: [] };
-    } catch (err) {
-      errors.push(err.message);
-      return { isValid: false, errors };
-    }
-  }
-
-  if (["yaml", "yml"].includes(normalizedLang)) {
-    try {
-      yaml.parse(code);
-      return { isValid: true, errors: [] };
-    } catch (err) {
-      errors.push(err.message);
-      return { isValid: false, errors };
-    }
-  }
-
-  // Structural integrity for python/rust
-  if (["python", "py", "rust", "rs"].includes(normalizedLang)) {
-    const delimiters = { "(": ")", "{": "}", "[": "]" };
-    const stack = [];
-    for (const char of code) {
-      if (delimiters[char]) stack.push(char);
-      else if (Object.values(delimiters).includes(char)) {
-        const expected = Object.keys(delimiters).find((k) => delimiters[k] === char);
-        if (stack.pop() !== expected) {
-          errors.push(`Delimiter mismatch for '${char}'`);
-        }
-      }
-    }
-    if (stack.length > 0) errors.push("Unclosed delimiters");
-    return { isValid: errors.length === 0, errors };
-  }
-
-  return { isValid: true, errors: [] };
-}
-
-test("AST Validator: Valid TypeScript code parses cleanly", () => {
+test("AST Validator (Production Module): Valid TypeScript code parses cleanly with BABEL_AST", () => {
   const validTs = `
     import { useState } from 'react';
     interface Props { count: number; }
@@ -72,9 +25,10 @@ test("AST Validator: Valid TypeScript code parses cleanly", () => {
   const result = validateCodeBlock("typescript", validTs);
   assert.strictEqual(result.isValid, true);
   assert.strictEqual(result.errors.length, 0);
+  assert.strictEqual(result.validationType, "BABEL_AST");
 });
 
-test("AST Validator: Detects syntax error in broken JavaScript", () => {
+test("AST Validator (Production Module): Detects syntax error in broken JavaScript", () => {
   const brokenJs = `
     function calculate() {
       const x = ; // Syntax error
@@ -84,17 +38,65 @@ test("AST Validator: Detects syntax error in broken JavaScript", () => {
   const result = validateCodeBlock("javascript", brokenJs);
   assert.strictEqual(result.isValid, false);
   assert.ok(result.errors.length > 0);
+  assert.strictEqual(result.validationType, "BABEL_AST");
 });
 
-test("AST Validator: Validates JSON blocks", () => {
-  assert.strictEqual(validateCodeBlock("json", '{"name": "DevScribe", "version": "4.3.3"}').isValid, true);
-  assert.strictEqual(validateCodeBlock("json", '{"name": "DevScribe", trailing, }').isValid, false);
+test("AST Validator (Production Module): Validates JSON blocks with JSON_PARSE", () => {
+  const validJson = validateCodeBlock("json", '{"name": "DevScribe", "version": "4.3.3"}');
+  assert.strictEqual(validJson.isValid, true);
+  assert.strictEqual(validJson.validationType, "JSON_PARSE");
+
+  const brokenJson = validateCodeBlock("json", '{"name": "DevScribe", trailing, }');
+  assert.strictEqual(brokenJson.isValid, false);
+  assert.strictEqual(brokenJson.validationType, "JSON_PARSE");
 });
 
-test("AST Validator: Delimiter checks on Python/Rust code", () => {
+test("AST Validator (Production Module): Validates YAML blocks with YAML_PARSE", () => {
+  const validYaml = validateCodeBlock("yaml", "name: DevScribe\nversion: 4.3.3\nfeatures:\n  - AI\n  - Agents");
+  assert.strictEqual(validYaml.isValid, true);
+  assert.strictEqual(validYaml.validationType, "YAML_PARSE");
+
+  const brokenYaml = validateCodeBlock("yaml", "name: [broken yaml: {unclosed");
+  assert.strictEqual(brokenYaml.isValid, false);
+  assert.strictEqual(brokenYaml.validationType, "YAML_PARSE");
+});
+
+test("AST Validator (Production Module): Delimiter structural check on Python/Rust code (DELIMITER_CHECK_ONLY)", () => {
   const validPython = `def calculate_metrics(items):\n    return [x * 2 for x in items if x > 0]\n`;
   const brokenRust = `fn main() { let x = (1 + 2; println!("{}", x); }`; // unclosed paren
 
-  assert.strictEqual(validateCodeBlock("python", validPython).isValid, true);
-  assert.strictEqual(validateCodeBlock("rust", brokenRust).isValid, false);
+  const pyResult = validateCodeBlock("python", validPython);
+  assert.strictEqual(pyResult.isValid, true);
+  assert.strictEqual(pyResult.validationType, "DELIMITER_CHECK_ONLY");
+
+  const rustResult = validateCodeBlock("rust", brokenRust);
+  assert.strictEqual(rustResult.isValid, false);
+  assert.strictEqual(rustResult.validationType, "DELIMITER_CHECK_ONLY");
+});
+
+test("AST Validator (Production Module): Full article markdown code block extraction and validation", () => {
+  const sampleMarkdown = `
+# Building High-Performance Services
+
+Here is our configuration:
+\`\`\`json
+{
+  "port": 8080,
+  "service": "api-gateway"
+}
+\`\`\`
+
+Here is our main handler:
+\`\`\`typescript
+export function startServer(port: number): void {
+  console.log("Listening on " + port);
+}
+\`\`\`
+  `;
+
+  const result = validateArticleCode(sampleMarkdown);
+  assert.strictEqual(result.allValid, true);
+  assert.strictEqual(result.blocksValidated, 2);
+  assert.strictEqual(result.blocks[0].validationType, "JSON_PARSE");
+  assert.strictEqual(result.blocks[1].validationType, "BABEL_AST");
 });

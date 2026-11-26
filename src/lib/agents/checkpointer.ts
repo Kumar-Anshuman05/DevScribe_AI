@@ -5,6 +5,34 @@ let checkpointerPool: Pool | null = null;
 let checkpointer: PostgresSaver | null = null;
 let checkpointerInitPromise: Promise<PostgresSaver> | null = null;
 
+/**
+ * Determines explicit SSL configuration for PostgreSQL connections.
+ * - In production: strict TLS certificate validation is mandatory (rejectUnauthorized: true).
+ * - Disabling certificate verification in production ({ rejectUnauthorized: false }) is strictly forbidden.
+ * - Supports custom CA certificate via DATABASE_SSL_CERT.
+ */
+export function getPoolSslConfig(
+  env: NodeJS.ProcessEnv = process.env
+): boolean | { rejectUnauthorized: boolean; ca?: string } {
+  const isProduction = env.NODE_ENV === "production";
+
+  if (isProduction) {
+    return {
+      rejectUnauthorized: true,
+      ...(env.DATABASE_SSL_CERT ? { ca: env.DATABASE_SSL_CERT } : {}),
+    };
+  }
+
+  if (env.DATABASE_SSL === "true" || env.DATABASE_SSL_CERT) {
+    return {
+      rejectUnauthorized: env.DATABASE_SSL_REJECT_UNAUTHORIZED !== "false",
+      ...(env.DATABASE_SSL_CERT ? { ca: env.DATABASE_SSL_CERT } : {}),
+    };
+  }
+
+  return false;
+}
+
 function getPool(): Pool {
   const connectionString =
     process.env.CHECKPOINTER_DATABASE_URL ||
@@ -19,22 +47,7 @@ function getPool(): Pool {
   }
 
   if (!checkpointerPool) {
-    // Determine explicit SSL configuration
-    // In production: strict TLS certificate validation is mandatory (rejectUnauthorized: true).
-    // Disabling certificate verification in production ({ rejectUnauthorized: false }) is strictly forbidden.
-    let sslConfig: boolean | { rejectUnauthorized: boolean; ca?: string } = false;
-
-    if (process.env.NODE_ENV === "production") {
-      sslConfig = {
-        rejectUnauthorized: true,
-        ...(process.env.DATABASE_SSL_CERT ? { ca: process.env.DATABASE_SSL_CERT } : {}),
-      };
-    } else if (process.env.DATABASE_SSL === "true" || process.env.DATABASE_SSL_CERT) {
-      sslConfig = {
-        rejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED !== "false",
-        ...(process.env.DATABASE_SSL_CERT ? { ca: process.env.DATABASE_SSL_CERT } : {}),
-      };
-    }
+    const sslConfig = getPoolSslConfig();
 
     checkpointerPool = new Pool({
       connectionString,
@@ -61,21 +74,23 @@ export async function getSafeCheckpointer(): Promise<PostgresSaver> {
     return checkpointer;
   }
 
-  if (!checkpointerInitPromise) {
-    checkpointerInitPromise = (async () => {
-      try {
-        const saver = new PostgresSaver(pool);
-        await saver.setup();
-        checkpointer = saver;
-        return checkpointer;
-      } catch (err: any) {
-        checkpointerInitPromise = null;
-        throw new Error(
-          `CHECKPOINTER_CONFIGURATION_ERROR: Failed to initialize durable PostgresSaver checkpointer: ${err.message}`
-        );
-      }
-    })();
+  if (checkpointerInitPromise) {
+    return checkpointerInitPromise;
   }
+
+  checkpointerInitPromise = (async () => {
+    try {
+      const saver = new PostgresSaver(pool);
+      await saver.setup();
+      checkpointer = saver;
+      return saver;
+    } catch (err: any) {
+      checkpointerInitPromise = null;
+      throw new Error(
+        `CHECKPOINTER_CONFIGURATION_ERROR: Failed to initialize durable PostgreSQL checkpointer: ${err.message}`
+      );
+    }
+  })();
 
   return checkpointerInitPromise;
 }

@@ -54,20 +54,26 @@ export async function handleJobFailure(jobId: string, errorMsg: string) {
     });
 
     if (!existingOutbox) {
-      await tx.outboxEvent.create({
-        data: {
-          aggregateType: "GenerationJob",
-          aggregateId: jobId,
-          eventType: "job.failed",
-          payload: {
-            jobId,
-            error: errorMsg,
-            status: "FAILED",
-            failedAt: new Date().toISOString(),
+      try {
+        await tx.outboxEvent.create({
+          data: {
+            aggregateType: "GenerationJob",
+            aggregateId: jobId,
+            eventType: "job.failed",
+            payload: {
+              jobId,
+              error: errorMsg,
+              status: "FAILED",
+              failedAt: new Date().toISOString(),
+            },
+            status: "PENDING",
           },
-          status: "PENDING",
-        },
-      });
+        });
+      } catch (err: any) {
+        if (err.code !== "P2002") {
+          throw err;
+        }
+      }
     }
 
     // 4. Atomically record NODE_FAILED generation event for telemetry
@@ -234,25 +240,41 @@ export const generationWorkflow = inngest.createFunction(
           },
         });
 
-        // 3. Atomically commit Webhook OutboxEvent
-        await tx.outboxEvent.create({
-          data: {
+        // 3. Atomically commit Webhook OutboxEvent (idempotent with P2002 handling)
+        const existingOutbox = await tx.outboxEvent.findFirst({
+          where: {
             aggregateType: "GenerationJob",
             aggregateId: jobId,
             eventType: "job.completed",
-            payload: {
-              jobId,
-              articleId: article.id,
-              slug: article.slug,
-              title: article.title,
-              qualityScore: article.qualityScore,
-              status: terminalStatus,
-              wordCount: article.wordCount,
-              completedAt: new Date().toISOString(),
-            },
-            status: "PENDING",
           },
         });
+
+        if (!existingOutbox) {
+          try {
+            await tx.outboxEvent.create({
+              data: {
+                aggregateType: "GenerationJob",
+                aggregateId: jobId,
+                eventType: "job.completed",
+                payload: {
+                  jobId,
+                  articleId: article.id,
+                  slug: article.slug,
+                  title: article.title,
+                  qualityScore: article.qualityScore,
+                  status: terminalStatus,
+                  wordCount: article.wordCount,
+                  completedAt: new Date().toISOString(),
+                },
+                status: "PENDING",
+              },
+            });
+          } catch (err: any) {
+            if (err.code !== "P2002") {
+              throw err;
+            }
+          }
+        }
       });
     });
 

@@ -1,6 +1,6 @@
 import { parse as babelParse } from "@babel/parser";
 import yaml from "yaml";
-import { CodeBlockItem, CodeValidationResult } from "./state";
+import type { CodeBlockItem, CodeValidationResult, CodeValidationType } from "./state";
 
 /**
  * Extracts all fenced code blocks from markdown text with their language tags.
@@ -19,52 +19,67 @@ export function extractCodeBlocksFromMarkdown(markdown: string): Array<{ languag
   return blocks;
 }
 
+export interface ValidationOutput {
+  isValid: boolean;
+  errors: string[];
+  validationType: CodeValidationType;
+}
+
 /**
- * Deterministic AST Syntax Validator.
- * NOTE: AI-generated code is NEVER executed on the host runtime!
- * Static syntax grammar inspection only.
+ * Deterministic AST Syntax & Structural Validator.
+ *
+ * SECURITY REQUIREMENT:
+ * AI-generated code is NEVER executed on the host runtime!
+ * Static syntax grammar inspection, structural parsing, and delimiter checks ONLY.
+ *
+ * - JavaScript/TypeScript/JSX/TSX: Babel AST Parser (strict syntax validation)
+ * - JSON: Native JSON.parse grammar check
+ * - YAML: YAML parser grammar check
+ * - Python/Go/Rust/SQL: Balanced delimiter and structural integrity gate (DELIMITER_CHECK_ONLY)
+ * - Other/Unknown: Permitted with UNVALIDATED tag
  */
-export function validateCodeBlock(language: string, code: string): { isValid: boolean; errors: string[] } {
+export function validateCodeBlock(language: string, code: string): ValidationOutput {
   const normalizedLang = language.toLowerCase();
   const errors: string[] = [];
 
-  // TypeScript / JavaScript / JSX / TSX
+  // TypeScript / JavaScript / JSX / TSX — Full Babel AST Validation
   if (["typescript", "ts", "javascript", "js", "tsx", "jsx"].includes(normalizedLang)) {
     try {
       babelParse(code, {
         sourceType: "module",
         plugins: ["typescript", "jsx", "decorators-legacy", "classProperties"],
       });
-      return { isValid: true, errors: [] };
+      return { isValid: true, errors: [], validationType: "BABEL_AST" };
     } catch (err: any) {
       errors.push(`Babel AST Parse Error [line ${err.loc?.line ?? "?"}, col ${err.loc?.column ?? "?"}]: ${err.message}`);
-      return { isValid: false, errors };
+      return { isValid: false, errors, validationType: "BABEL_AST" };
     }
   }
 
-  // JSON
+  // JSON — Native JSON Parser Validation
   if (["json"].includes(normalizedLang)) {
     try {
       JSON.parse(code);
-      return { isValid: true, errors: [] };
+      return { isValid: true, errors: [], validationType: "JSON_PARSE" };
     } catch (err: any) {
       errors.push(`JSON Parse Error: ${err.message}`);
-      return { isValid: false, errors };
+      return { isValid: false, errors, validationType: "JSON_PARSE" };
     }
   }
 
-  // YAML
+  // YAML — YAML Parser Validation
   if (["yaml", "yml"].includes(normalizedLang)) {
     try {
       yaml.parse(code);
-      return { isValid: true, errors: [] };
+      return { isValid: true, errors: [], validationType: "YAML_PARSE" };
     } catch (err: any) {
       errors.push(`YAML Parse Error: ${err.message}`);
-      return { isValid: false, errors };
+      return { isValid: false, errors, validationType: "YAML_PARSE" };
     }
   }
 
   // Python, Go, Rust, SQL: Structural Integrity Gate (Balanced delimiters and syntax cues)
+  // NOTE: This is explicitly a delimiter & structural check, NOT a full compiler/AST validation.
   if (["python", "py", "go", "golang", "rust", "rs", "sql"].includes(normalizedLang)) {
     const delimiters: Record<string, string> = { "(": ")", "{": "}", "[": "]" };
     const stack: string[] = [];
@@ -101,11 +116,15 @@ export function validateCodeBlock(language: string, code: string): { isValid: bo
       errors.push(`Unclosed Delimiters in ${normalizedLang} snippet: Unclosed [${stack.join(", ")}]`);
     }
 
-    return { isValid: errors.length === 0, errors };
+    return {
+      isValid: errors.length === 0,
+      errors,
+      validationType: "DELIMITER_CHECK_ONLY",
+    };
   }
 
-  // Default: Unknown or markup languages (e.g. bash, sh, markdown, text, html) - accept with delimiter check
-  return { isValid: true, errors: [] };
+  // Default: Unknown or documentation languages (e.g. bash, sh, markdown, text, html)
+  return { isValid: true, errors: [], validationType: "UNVALIDATED" };
 }
 
 /**
@@ -123,6 +142,7 @@ export function validateArticleCode(markdown: string): CodeValidationResult {
       code: block.code,
       isValid: result.isValid,
       errors: result.errors,
+      validationType: result.validationType,
     });
 
     if (!result.isValid) {

@@ -4,10 +4,14 @@ import crypto from "crypto";
  * Deterministic deep canonical JSON serializer.
  * - Recursively sorts object keys lexicographically.
  * - Preserves array element order.
- * - Normalizes undefined/functions according to JSON.stringify behavior.
+ * - Rejects non-serializable top-level values (undefined, functions, symbols).
  * - Produces deterministic SHA-256 hash across semantically identical JSON payloads.
  */
 export function canonicalJsonStringify(value: unknown): string {
+  if (value === undefined || typeof value === "function" || typeof value === "symbol") {
+    throw new Error("CANONICAL_JSON_ERROR: Value is not serializable JSON (undefined, function, or symbol).");
+  }
+
   if (value === null || typeof value !== "object") {
     return JSON.stringify(value);
   }
@@ -23,7 +27,7 @@ export function canonicalJsonStringify(value: unknown): string {
 
   for (const key of sortedKeys) {
     const val = obj[key];
-    // Skip undefined or function values, consistent with JSON.stringify
+    // Skip undefined or function values inside objects, consistent with JSON.stringify
     if (val === undefined || typeof val === "function" || typeof val === "symbol") {
       continue;
     }

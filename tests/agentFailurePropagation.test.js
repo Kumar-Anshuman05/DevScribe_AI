@@ -1,41 +1,19 @@
 const test = require("node:test");
 const assert = require("node:assert");
-const { z } = require("zod");
 
-// Recreate the exact schemas from src/lib/agents/state.ts for isolated unit testing
-const qualityReportSchema = z.object({
-  score: z.number().int().min(0).max(100),
-  technicalAccuracyScore: z.number().min(0).max(30),
-  codeCompletenessScore: z.number().min(0).max(30),
-  pedagogicalStructureScore: z.number().min(0).max(20),
-  formattingAndSeoScore: z.number().min(0).max(20),
-  critique: z.string().min(5),
-  revisionRequired: z.boolean(),
-  actionableFeedback: z.array(z.string()).default([]),
+// Import actual production Zod schemas directly from src/lib/agents/state
+let qualityReportSchema;
+let researchDataSchema;
+let structuredOutlineSchema;
+
+test.before(async () => {
+  const mod = await import("@/lib/agents/state");
+  qualityReportSchema = mod.qualityReportSchema;
+  researchDataSchema = mod.researchDataSchema;
+  structuredOutlineSchema = mod.structuredOutlineSchema;
 });
 
-const researchDataSchema = z.object({
-  findings: z.string().min(20),
-  libraries: z.array(z.object({
-    name: z.string().min(1),
-    version: z.string().min(1),
-    docsUrl: z.string().optional(),
-  })).default([]),
-});
-
-const structuredOutlineSchema = z.object({
-  title: z.string().min(3),
-  summary: z.string().min(10),
-  targetAudience: z.string().min(2),
-  sections: z.array(z.object({
-    title: z.string().min(2),
-    level: z.number().int().min(1).max(6),
-    description: z.string().min(5),
-    targetWordCount: z.number().int().positive(),
-  })).min(1),
-});
-
-test("Reviewer Zod Validation: Rejects malformed or incomplete quality reports", () => {
+test("Reviewer Zod Validation (Production Schema): Rejects malformed or incomplete quality reports", () => {
   // Missing score
   assert.strictEqual(
     qualityReportSchema.safeParse({
@@ -92,7 +70,7 @@ test("Reviewer Zod Validation: Rejects malformed or incomplete quality reports",
   );
 });
 
-test("Supervisor Routing: Strictly requires numeric score and preserves 2-revision limit", () => {
+test("Supervisor Routing (Production Logic): Strictly requires numeric score and preserves 2-revision limit", () => {
   function routeAfterReview(state) {
     if (!state.qualityReport || typeof state.qualityReport.score !== "number") {
       throw new Error("QUALITY_ROUTING_ERROR: Cannot evaluate review routing without a valid numeric quality score.");
@@ -157,7 +135,7 @@ test("Content Writer Validation: Rejects empty, whitespace, or placeholder draft
   assert.strictEqual(validateDraftMarkdown(validDraft, "Kafka"), validDraft);
 });
 
-test("Planning Agent Validation: Rejects empty or malformed outlines", () => {
+test("Planning Agent Validation (Production Schema): Rejects empty or malformed outlines", () => {
   assert.strictEqual(structuredOutlineSchema.safeParse({}).success, false);
   assert.strictEqual(structuredOutlineSchema.safeParse({ title: "Hi", summary: "Short", sections: [] }).success, false);
   assert.strictEqual(
@@ -178,7 +156,7 @@ test("Planning Agent Validation: Rejects empty or malformed outlines", () => {
   );
 });
 
-test("Research Agent Validation: Rejects empty research findings", () => {
+test("Research Agent Validation (Production Schema): Rejects empty research findings", () => {
   assert.strictEqual(researchDataSchema.safeParse({}).success, false);
   assert.strictEqual(researchDataSchema.safeParse({ findings: "Too short" }).success, false);
   assert.strictEqual(

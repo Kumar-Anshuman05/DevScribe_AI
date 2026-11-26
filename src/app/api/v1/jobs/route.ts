@@ -2,8 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import crypto from "crypto";
 import prisma from "@/lib/prisma";
-import { authenticateApiKey } from "@/lib/auth/apiKey";
-import { createClient } from "@/lib/supabase/server";
+import { resolveUserAuth } from "@/lib/auth/resolveAuth";
 import { processWithIdempotency } from "@/lib/idempotency/guard";
 import { processPendingInngestEvents } from "@/lib/outbox/inngestDispatcher";
 import { ApiError } from "@/lib/api/error";
@@ -18,40 +17,6 @@ const createJobSchema = z.object({
   frameworks: z.array(z.string()).default([]),
   additionalGuidelines: z.string().max(2000).optional().nullable(),
 });
-
-/**
- * Resolves user identity from either Bearer API Key or Supabase Cookie Session.
- */
-async function resolveUserAuth(req: NextRequest, requiredScope: string) {
-  const authHeader = req.headers.get("authorization");
-
-  if (authHeader && authHeader.toLowerCase().startsWith("bearer ds_live_")) {
-    const apiAuth = await authenticateApiKey(authHeader, requiredScope);
-    if (!apiAuth.isValid) {
-      throw new ApiError(401, "UNAUTHORIZED", `API Key invalid: ${apiAuth.error}`);
-    }
-    return { userId: apiAuth.userId!, apiKeyId: apiAuth.apiKeyId };
-  }
-
-  // Fallback to Supabase cookie auth for web dashboard
-  try {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    if (user) {
-      // Ensure user exists in prisma DB
-      await prisma.user.upsert({
-        where: { id: user.id },
-        update: { email: user.email || "" },
-        create: { id: user.id, email: user.email || "" },
-      });
-      return { userId: user.id, apiKeyId: null };
-    }
-  } catch (err) {
-    // Cookie auth unavailable
-  }
-
-  throw new ApiError(401, "UNAUTHORIZED", "Missing or invalid authorization credentials. Provide Bearer API key or sign in.");
-}
 
 /**
  * POST /api/v1/jobs — Submit Generation Job with Fenced Idempotency
