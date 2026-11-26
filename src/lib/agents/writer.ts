@@ -14,6 +14,11 @@ MANDATORY EDITORIAL STANDARDS:
 
 export async function contentWriterAgentNode(state: ArticleStateType): Promise<Partial<ArticleStateType>> {
   console.log(`[Content Writer Agent] Writing article draft for topic: "${state.topic}" (Revision: ${state.revisionCount})`);
+
+  if (!state.outline || !state.outline.sections || state.outline.sections.length === 0) {
+    throw new Error(`CONTENT_WRITER_AGENT_ERROR: Cannot write draft for topic '${state.topic}' without valid structured outline.`);
+  }
+
   const ai = getAiClient();
 
   const isRevision = state.revisionCount > 0 && state.qualityReport?.actionableFeedback;
@@ -53,7 +58,12 @@ Write the complete, publication-grade markdown article now:`;
       },
     });
 
-    const draftMarkdown = response.text || "# " + state.topic + "\n\nDraft content pending.";
+    const draftMarkdown = response.text?.trim();
+
+    // Reject empty, whitespace, or placeholder content
+    if (!draftMarkdown || draftMarkdown.length < 100) {
+      throw new Error(`Writer returned empty or insufficient content (length: ${draftMarkdown?.length ?? 0}).`);
+    }
 
     return {
       draftMarkdown,
@@ -61,7 +71,7 @@ Write the complete, publication-grade markdown article now:`;
     };
   } catch (err: any) {
     console.error("[Content Writer Agent] Error generating draft:", err);
-    // Propagate error to terminate workflow in failure rather than returning synthetic success
+    // Propagate error to terminate workflow in failure rather than returning synthetic placeholder text
     throw new Error(`CONTENT_WRITER_AGENT_ERROR: Failed to generate technical draft for topic '${state.topic}': ${err.message}`);
   }
 }

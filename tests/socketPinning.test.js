@@ -50,6 +50,21 @@ function isPrivateOrReservedIp(ip) {
   return false;
 }
 
+function validateAllResolvedIps(lookupResults, allowLocal = false) {
+  if (!lookupResults || lookupResults.length === 0) {
+    return { isValid: false, blockedIp: "empty_records" };
+  }
+  if (allowLocal) {
+    return { isValid: true };
+  }
+  for (const record of lookupResults) {
+    if (isPrivateOrReservedIp(record.address)) {
+      return { isValid: false, blockedIp: record.address };
+    }
+  }
+  return { isValid: true };
+}
+
 function createPinnedLookup(resolvedIp) {
   const isIpv6 = resolvedIp.includes(":");
   const ipFamily = isIpv6 ? 6 : 4;
@@ -64,6 +79,48 @@ function createPinnedLookup(resolvedIp) {
     }
   };
 }
+
+test("Multi-Address DNS Validation: Rejects mixed public and private A records", () => {
+  const mixedRecords = [
+    { address: "93.184.216.34", family: 4 }, // Public (example.com)
+    { address: "127.0.0.1", family: 4 },     // Prohibited Loopback
+  ];
+
+  const result = validateAllResolvedIps(mixedRecords);
+  assert.strictEqual(result.isValid, false);
+  assert.strictEqual(result.blockedIp, "127.0.0.1");
+});
+
+test("Multi-Address DNS Validation: Rejects dual-stack with public IPv4 and link-local/loopback IPv6", () => {
+  const dualStackAttacker = [
+    { address: "104.244.42.1", family: 4 }, // Public IPv4
+    { address: "::1", family: 6 },          // Prohibited IPv6 Loopback
+  ];
+
+  const result1 = validateAllResolvedIps(dualStackAttacker);
+  assert.strictEqual(result1.isValid, false);
+  assert.strictEqual(result1.blockedIp, "::1");
+
+  const metadataAttack = [
+    { address: "104.244.42.1", family: 4 },
+    { address: "169.254.169.254", family: 4 }, // Cloud Metadata
+  ];
+  const result2 = validateAllResolvedIps(metadataAttack);
+  assert.strictEqual(result2.isValid, false);
+  assert.strictEqual(result2.blockedIp, "169.254.169.254");
+});
+
+test("Multi-Address DNS Validation: Permits multiple legitimate public addresses", () => {
+  const publicRecords = [
+    { address: "140.82.121.3", family: 4 },
+    { address: "140.82.121.4", family: 4 },
+    { address: "2607:f8b0:4005:805::200e", family: 6 },
+  ];
+
+  const result = validateAllResolvedIps(publicRecords);
+  assert.strictEqual(result.isValid, true);
+  assert.strictEqual(result.blockedIp, undefined);
+});
 
 test("Socket Pinning: Custom lookup pins to resolved IP and prevents DNS rebinding", (t, done) => {
   const targetIp = "93.184.216.34";

@@ -1,4 +1,4 @@
-import { ArticleStateType, QualityReport } from "./state";
+import { ArticleStateType, QualityReport, qualityReportSchema } from "./state";
 import { getAiClient, geminiConfig } from "../gemini/config";
 
 export const REVIEWER_SYSTEM_PROMPT = `You are the Lead Technical Reviewer and Quality Auditor for DevScribe AI.
@@ -37,6 +37,11 @@ Output strictly as a valid JSON object matching this schema:
 
 export async function qualityReviewerAgentNode(state: ArticleStateType): Promise<Partial<ArticleStateType>> {
   console.log(`[Quality Reviewer Agent] Auditing draft for topic: "${state.topic}" (Revision: ${state.revisionCount})`);
+
+  if (!state.draftMarkdown || !state.draftMarkdown.trim()) {
+    throw new Error(`QUALITY_REVIEWER_AGENT_ERROR: Cannot review empty draft for topic '${state.topic}'.`);
+  }
+
   const ai = getAiClient();
 
   const codeAuditInfo = state.codeValidation?.allValid
@@ -52,7 +57,7 @@ Frameworks: ${state.frameworks.join(", ") || "None"}
 ${codeAuditInfo}
 
 Draft Article Markdown:
-${state.draftMarkdown || "No draft provided."}
+${state.draftMarkdown}
 
 Evaluate the article against the 100-point rubric and output the JSON evaluation report:`;
 
@@ -68,7 +73,24 @@ Evaluate the article against the 100-point rubric and output the JSON evaluation
       },
     });
 
-    const parsed: QualityReport = JSON.parse(response.text || "{}");
+    const rawText = response.text?.trim();
+    if (!rawText) {
+      throw new Error("Empty response received from LLM during quality audit.");
+    }
+
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(rawText);
+    } catch (parseErr: any) {
+      throw new Error(`LLM output was not valid JSON: ${parseErr.message}`);
+    }
+
+    const validation = qualityReportSchema.safeParse(parsedJson);
+    if (!validation.success) {
+      throw new Error(`Quality report validation failed: ${JSON.stringify(validation.error.format())}`);
+    }
+
+    const parsed: QualityReport = validation.data;
 
     // Enforce that if automated code validation failed with syntax errors, score cannot exceed 80
     if (!state.codeValidation?.allValid && parsed.score > 80) {
@@ -86,7 +108,7 @@ Evaluate the article against the 100-point rubric and output the JSON evaluation
     };
   } catch (err: any) {
     console.error("[Quality Reviewer Agent] Error auditing draft:", err);
-    // Propagate error to terminate workflow in failure rather than returning synthetic success or hardcoded 86
+    // Propagate error to terminate workflow in failure rather than returning synthetic success or default score
     throw new Error(`QUALITY_REVIEWER_AGENT_ERROR: Failed to perform quality audit for topic '${state.topic}': ${err.message}`);
   }
 }

@@ -19,19 +19,29 @@ function getPool(): Pool {
   }
 
   if (!checkpointerPool) {
+    // Determine explicit SSL configuration
+    // In production: strict TLS certificate validation is mandatory (rejectUnauthorized: true).
+    // Disabling certificate verification in production ({ rejectUnauthorized: false }) is strictly forbidden.
+    let sslConfig: boolean | { rejectUnauthorized: boolean; ca?: string } = false;
+
+    if (process.env.NODE_ENV === "production") {
+      sslConfig = {
+        rejectUnauthorized: true,
+        ...(process.env.DATABASE_SSL_CERT ? { ca: process.env.DATABASE_SSL_CERT } : {}),
+      };
+    } else if (process.env.DATABASE_SSL === "true" || process.env.DATABASE_SSL_CERT) {
+      sslConfig = {
+        rejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED !== "false",
+        ...(process.env.DATABASE_SSL_CERT ? { ca: process.env.DATABASE_SSL_CERT } : {}),
+      };
+    }
+
     checkpointerPool = new Pool({
       connectionString,
       max: 3,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 5000,
-      ssl: process.env.DATABASE_SSL_CERT
-        ? {
-            rejectUnauthorized: true,
-            ca: process.env.DATABASE_SSL_CERT,
-          }
-        : process.env.NODE_ENV === "production"
-        ? { rejectUnauthorized: false }
-        : false,
+      ssl: sslConfig,
     });
   }
 

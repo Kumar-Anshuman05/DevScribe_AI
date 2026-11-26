@@ -118,6 +118,31 @@ export function isPrivateOrReservedIp(ip: string): boolean {
 }
 
 /**
+ * Validates every resolved A and AAAA address against the SSRF denylist.
+ * Rejects the entire hostname if ANY resolved address is private, loopback, or metadata.
+ */
+export function validateAllResolvedIps(
+  lookupResults: Array<{ address: string; family?: number }>,
+  allowLocal = false
+): { isValid: boolean; blockedIp?: string } {
+  if (!lookupResults || lookupResults.length === 0) {
+    return { isValid: false, blockedIp: "empty_records" };
+  }
+
+  if (allowLocal) {
+    return { isValid: true };
+  }
+
+  for (const record of lookupResults) {
+    if (isPrivateOrReservedIp(record.address)) {
+      return { isValid: false, blockedIp: record.address };
+    }
+  }
+
+  return { isValid: true };
+}
+
+/**
  * Creates a custom DNS lookup resolver that pins outgoing connections
  * to the pre-validated IP address, eliminating TOCTOU / DNS rebinding attacks.
  */
@@ -142,8 +167,9 @@ export function createPinnedLookup(resolvedIp: string) {
 }
 
 /**
- * Dispatches an outbound webhook HTTP POST request with DNS socket pinning anti-SSRF protection,
- * dual-secret rotation headers, stable delivery ID, 5s timeout, and 4KB body cap.
+ * Dispatches an outbound webhook HTTP POST request with multi-address DNS validation,
+ * socket pinning anti-SSRF protection, dual-secret rotation headers, stable delivery ID,
+ * 5s timeout, and 4KB body cap.
  */
 export async function sendWebhookHttp(params: SendWebhookHttpParams): Promise<WebhookHttpResult> {
   const parsedUrl = new URL(params.url);
@@ -164,11 +190,11 @@ export async function sendWebhookHttp(params: SendWebhookHttpParams): Promise<We
     };
   }
 
-  // 2. DNS Resolution & IP denylist validation (Anti-SSRF)
-  let resolvedIp: string;
+  // 2. DNS Resolution & Multi-record validation (Anti-SSRF)
+  let lookupResults: Array<{ address: string; family: number }>;
   try {
-    const lookupResult = await dns.promises.lookup(parsedUrl.hostname);
-    resolvedIp = lookupResult.address;
+    const rawLookup = await dns.promises.lookup(parsedUrl.hostname, { all: true });
+    lookupResults = Array.isArray(rawLookup) ? rawLookup : [rawLookup];
   } catch (err: any) {
     return {
       isSuccess: false,
@@ -176,14 +202,25 @@ export async function sendWebhookHttp(params: SendWebhookHttpParams): Promise<We
     };
   }
 
-  // Denylist enforcement across all environments (override with ALLOW_LOCAL_WEBHOOKS=true for local testing)
-  const allowLocal = process.env.ALLOW_LOCAL_WEBHOOKS === "true";
-  if (!allowLocal && isPrivateOrReservedIp(resolvedIp)) {
+  if (!lookupResults || lookupResults.length === 0) {
     return {
       isSuccess: false,
-      errorMessage: `SSRF_BLOCKED: Resolved IP '${resolvedIp}' is in a private, loopback, or metadata subnet.`,
+      errorMessage: `DNS_RESOLUTION_FAILED: No DNS A/AAAA records returned for hostname '${parsedUrl.hostname}'.`,
     };
   }
+
+  // Reject the hostname if ANY resolved address is private, reserved, loopback, or metadata
+  const allowLocal = process.env.ALLOW_LOCAL_WEBHOOKS === "true";
+  const validation = validateAllResolvedIps(lookupResults, allowLocal);
+  if (!validation.isValid) {
+    return {
+      isSuccess: false,
+      errorMessage: `SSRF_BLOCKED: Hostname '${parsedUrl.hostname}' resolved to prohibited IP '${validation.blockedIp}' in a private, loopback, or metadata subnet.`,
+    };
+  }
+
+  // Pin outgoing socket connection to the first pre-validated IP address
+  const resolvedIp = lookupResults[0].address;
 
   // 3. Decrypt primary secret & compute signature
   const primarySecret = decryptWebhookSecret({

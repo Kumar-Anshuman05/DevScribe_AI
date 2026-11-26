@@ -5,21 +5,55 @@ import { processPendingWebhookDeliveries } from "@/lib/webhooks/dispatcher";
 
 /**
  * Persists terminal failure state atomically and generates outbox event for webhook dispatch.
+ * Fully idempotent and safe under repeated or concurrent invocations.
+ * Guards against overwriting already completed jobs.
+ * Ensures failure outbox event deduplication.
+ * Does not swallow persistence errors so Inngest retry/recovery can observe them.
  */
 export async function handleJobFailure(jobId: string, errorMsg: string) {
-  try {
-    await prisma.$transaction(async (tx) => {
-      // 1. Update GenerationJob to terminal FAILED state
-      await tx.generationJob.update({
-        where: { id: jobId },
-        data: {
-          status: "FAILED",
-          errorMessage: errorMsg,
-          completedAt: new Date(),
-        },
-      });
+  await prisma.$transaction(async (tx) => {
+    // 1. Fetch current job state
+    const existingJob = await tx.generationJob.findUnique({
+      where: { id: jobId },
+    });
 
-      // 2. Atomically insert Webhook OutboxEvent with eventType = 'job.failed'
+    if (!existingJob) {
+      console.warn(`[Inngest Failure Handler] Job ${jobId} not found, skipping failure persistence.`);
+      return;
+    }
+
+    // Guard: completed job MUST NOT be overwritten as FAILED by late failure callback
+    if (existingJob.status === "COMPLETED" || existingJob.status === "COMPLETED_WITH_WARNINGS") {
+      console.warn(`[Inngest Failure Handler] Ignored late failure callback for already completed job ${jobId}.`);
+      return;
+    }
+
+    // Idempotency: if already FAILED, ensure outbox event exists but avoid duplicate telemetry
+    if (existingJob.status === "FAILED") {
+      console.log(`[Inngest Failure Handler] Job ${jobId} is already in FAILED state.`);
+      return;
+    }
+
+    // 2. Transition GenerationJob to terminal FAILED state
+    await tx.generationJob.update({
+      where: { id: jobId },
+      data: {
+        status: "FAILED",
+        errorMessage: errorMsg,
+        completedAt: new Date(),
+      },
+    });
+
+    // 3. Atomically insert deduplicated Webhook OutboxEvent
+    const existingOutbox = await tx.outboxEvent.findFirst({
+      where: {
+        aggregateType: "GenerationJob",
+        aggregateId: jobId,
+        eventType: "job.failed",
+      },
+    });
+
+    if (!existingOutbox) {
       await tx.outboxEvent.create({
         data: {
           aggregateType: "GenerationJob",
@@ -34,25 +68,23 @@ export async function handleJobFailure(jobId: string, errorMsg: string) {
           status: "PENDING",
         },
       });
+    }
 
-      // 3. Atomically record NODE_FAILED generation event for telemetry
-      await tx.generationEvent.create({
-        data: {
-          jobId,
-          agentName: "supervisor",
-          eventType: "NODE_FAILED",
-          errorMessage: errorMsg,
-          stateSnapshot: { stage: "WORKFLOW_FAILED" },
-        },
-      });
+    // 4. Atomically record NODE_FAILED generation event for telemetry
+    await tx.generationEvent.create({
+      data: {
+        jobId,
+        agentName: "supervisor",
+        eventType: "NODE_FAILED",
+        errorMessage: errorMsg,
+        stateSnapshot: { stage: "WORKFLOW_FAILED" },
+      },
     });
+  });
 
-    // 4. Trigger Webhook Dispatcher to notify subscribers immediately
-    const workerId = `inngest-failure-worker-${Date.now()}`;
-    await processPendingWebhookDeliveries(workerId);
-  } catch (err) {
-    console.error(`[Inngest Workflow] Failed to persist durable failure for job ${jobId}:`, err);
-  }
+  // 5. Trigger Webhook Dispatcher to notify subscribers immediately (strictly job.completed / job.failed)
+  const workerId = `inngest-failure-worker-${Date.now()}`;
+  await processPendingWebhookDeliveries(workerId);
 }
 
 export const generationWorkflow = inngest.createFunction(
@@ -145,11 +177,19 @@ export const generationWorkflow = inngest.createFunction(
 
     // Step 3: Atomic Transaction — Insert Article + Update Job + Commit Webhook OutboxEvent
     await step.run("persist-article-and-outbox", async () => {
-      const markdown = agentOutput.draftMarkdown || `# ${job.topic}\n\nGenerated content.`;
+      const markdown = agentOutput.draftMarkdown;
+      if (!markdown || !markdown.trim()) {
+        throw new Error("WORKFLOW_EXECUTION_ERROR: Pipeline generated an empty draft article.");
+      }
+
+      if (!agentOutput.qualityReport || typeof agentOutput.qualityReport.score !== "number") {
+        throw new Error("WORKFLOW_EXECUTION_ERROR: Pipeline completed without a valid QualityReport.");
+      }
+
+      const qualityScore = agentOutput.qualityReport.score;
+      const terminalStatus = qualityScore >= 85 ? "COMPLETED" : "COMPLETED_WITH_WARNINGS";
       const wordCount = markdown.split(/\s+/).filter(Boolean).length;
       const readingTimeMinutes = Math.max(1, Math.round(wordCount / 200));
-      const qualityScore = agentOutput.qualityReport?.score ?? 85;
-      const terminalStatus = qualityScore >= 85 ? "COMPLETED" : "COMPLETED_WITH_WARNINGS";
 
       const slugBase = job.topic
         .toLowerCase()
@@ -158,6 +198,12 @@ export const generationWorkflow = inngest.createFunction(
       const slug = `${slugBase}-${job.id.slice(0, 8)}`;
 
       await prisma.$transaction(async (tx) => {
+        // Guard against late persist on already-terminal job
+        const currentJob = await tx.generationJob.findUnique({ where: { id: jobId } });
+        if (currentJob?.status === "COMPLETED" || currentJob?.status === "COMPLETED_WITH_WARNINGS") {
+          return;
+        }
+
         // 1. Update GenerationJob to terminal state
         await tx.generationJob.update({
           where: { id: jobId },

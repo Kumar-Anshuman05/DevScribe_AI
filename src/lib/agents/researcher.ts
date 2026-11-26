@@ -1,4 +1,4 @@
-import { ArticleStateType, ResearchData } from "./state";
+import { ArticleStateType, ResearchData, researchDataSchema } from "./state";
 import { getAiClient, geminiConfig } from "../gemini/config";
 import { executeSearch } from "../gemini/search";
 
@@ -55,17 +55,26 @@ Conduct technical research and return the JSON object:`;
       },
     });
 
-    const rawText = response.text || "{}";
-    let parsed: any = {};
+    const rawText = response.text?.trim();
+    if (!rawText) {
+      throw new Error("Empty response received from LLM during research generation.");
+    }
+
+    let parsedJson: unknown;
     try {
-      parsed = JSON.parse(rawText);
-    } catch {
-      parsed = { findings: rawText, libraries: [] };
+      parsedJson = JSON.parse(rawText);
+    } catch (parseErr: any) {
+      throw new Error(`LLM output was not valid JSON: ${parseErr.message}`);
+    }
+
+    const validation = researchDataSchema.safeParse(parsedJson);
+    if (!validation.success) {
+      throw new Error(`Research validation failed: ${JSON.stringify(validation.error.format())}`);
     }
 
     const researchData: ResearchData = {
-      findings: parsed.findings || "Research conducted successfully.",
-      libraries: Array.isArray(parsed.libraries) ? parsed.libraries : [],
+      findings: validation.data.findings,
+      libraries: validation.data.libraries,
       sources: searchResult.sources,
     };
 
@@ -75,7 +84,7 @@ Conduct technical research and return the JSON object:`;
     };
   } catch (err: any) {
     console.error("[Research Agent] Error generating research:", err);
-    // Propagate error to terminate workflow in failure rather than returning synthetic success
+    // Propagate error to terminate workflow in failure rather than returning synthetic success or empty state
     throw new Error(`RESEARCH_AGENT_ERROR: Failed during technical research phase for topic '${state.topic}': ${err.message}`);
   }
 }

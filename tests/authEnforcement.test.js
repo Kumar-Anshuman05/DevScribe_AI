@@ -49,6 +49,47 @@ test("Resource Ownership Enforcement: Cross-user resource access is rejected wit
   assert.strictEqual(aliceAttempt.success, true);
 });
 
+test("Independent API Route Authorization: Does not rely on middleware alone", () => {
+  // Simulates an API route handler invoked directly without middleware
+  function apiRouteHandler(headers, session) {
+    const authHeader = headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ds_live_")) {
+      return { authenticated: true, authType: "api_key" };
+    }
+    if (session?.user?.id) {
+      return { authenticated: true, authType: "session", userId: session.user.id };
+    }
+    return { authenticated: false, status: 401, error: "Missing or invalid authorization credentials." };
+  }
+
+  // Missing all credentials
+  const res1 = apiRouteHandler({}, null);
+  assert.strictEqual(res1.authenticated, false);
+  assert.strictEqual(res1.status, 401);
+
+  // Valid session
+  const res2 = apiRouteHandler({}, { user: { id: "user_123" } });
+  assert.strictEqual(res2.authenticated, true);
+  assert.strictEqual(res2.userId, "user_123");
+
+  // Valid Bearer key
+  const res3 = apiRouteHandler({ authorization: "Bearer ds_live_abcdef123456" }, null);
+  assert.strictEqual(res3.authenticated, true);
+  assert.strictEqual(res3.authType, "api_key");
+});
+
+test("Dashboard Layout Protection: Server-side redirect for unauthenticated visitors", () => {
+  function checkDashboardAccess(user) {
+    if (!user) {
+      return { redirect: "/login" };
+    }
+    return { render: true };
+  }
+
+  assert.deepStrictEqual(checkDashboardAccess(null), { redirect: "/login" });
+  assert.deepStrictEqual(checkDashboardAccess({ id: "user_123" }), { render: true });
+});
+
 test("Cross-User Article Access: Query is scoped strictly by authenticated userId", () => {
   const articlesDatabase = [
     { id: "art_1", userId: "user_alice", title: "Alice's Post" },

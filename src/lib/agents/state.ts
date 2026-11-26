@@ -1,4 +1,5 @@
 import { Annotation } from "@langchain/langgraph";
+import { z } from "zod";
 
 export interface GroundingSource {
   title: string;
@@ -13,6 +14,19 @@ export interface ResearchData {
   sources: GroundingSource[];
 }
 
+export const researchDataSchema = z.object({
+  findings: z.string().min(20, "Research findings must be substantive and non-empty"),
+  libraries: z
+    .array(
+      z.object({
+        name: z.string().min(1),
+        version: z.string().min(1),
+        docsUrl: z.string().optional(),
+      })
+    )
+    .default([]),
+});
+
 export interface OutlineSection {
   title: string;
   level: number;
@@ -22,12 +36,28 @@ export interface OutlineSection {
   keyTopics?: string[];
 }
 
+export const outlineSectionSchema = z.object({
+  title: z.string().min(2, "Section title required"),
+  level: z.number().int().min(1).max(6),
+  description: z.string().min(5, "Section description must be descriptive"),
+  targetWordCount: z.number().int().positive(),
+  learningObjectives: z.array(z.string()).optional(),
+  keyTopics: z.array(z.string()).optional(),
+});
+
 export interface StructuredOutline {
   title: string;
   summary: string;
   targetAudience: string;
   sections: OutlineSection[];
 }
+
+export const structuredOutlineSchema = z.object({
+  title: z.string().min(3, "Outline title must be at least 3 characters"),
+  summary: z.string().min(10, "Outline summary must be substantive"),
+  targetAudience: z.string().min(2),
+  sections: z.array(outlineSectionSchema).min(1, "Outline must contain at least one section"),
+});
 
 export interface CodeBlockItem {
   language: string;
@@ -53,6 +83,17 @@ export interface QualityReport {
   revisionRequired: boolean;
   actionableFeedback?: string[];
 }
+
+export const qualityReportSchema = z.object({
+  score: z.number().int().min(0).max(100),
+  technicalAccuracyScore: z.number().min(0).max(30),
+  codeCompletenessScore: z.number().min(0).max(30),
+  pedagogicalStructureScore: z.number().min(0).max(20),
+  formattingAndSeoScore: z.number().min(0).max(20),
+  critique: z.string().min(5, "Critique must be substantive"),
+  revisionRequired: z.boolean(),
+  actionableFeedback: z.array(z.string()).default([]),
+});
 
 /**
  * ArticleState Definition for LangGraph.js cyclic multi-agent graph.

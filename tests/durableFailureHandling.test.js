@@ -1,26 +1,47 @@
 const test = require("node:test");
 const assert = require("node:assert");
 
-test("Durable Failure Handling: Atomically transitions job to FAILED and creates job.failed outbox event", async () => {
-  // Simulate transactional database operations
-  const db = {
+function createMockDb() {
+  return {
     jobs: new Map([
       ["job_123", { id: "job_123", status: "RESEARCHING", errorMessage: null, completedAt: null }],
+      ["job_completed", { id: "job_completed", status: "COMPLETED", errorMessage: null, completedAt: new Date().toISOString() }],
+      ["job_warnings", { id: "job_warnings", status: "COMPLETED_WITH_WARNINGS", errorMessage: null, completedAt: new Date().toISOString() }],
     ]),
     outbox: [],
     events: [],
   };
+}
 
-  async function handleJobFailure(jobId, errorMsg) {
-    const job = db.jobs.get(jobId);
-    if (!job) throw new Error("Job not found");
+async function handleJobFailure(db, jobId, errorMsg, shouldFailDb = false) {
+  if (shouldFailDb) {
+    throw new Error("DB_CONNECTION_TIMEOUT: Transient database failure during transaction");
+  }
 
-    // 1. Terminal status FAILED
-    job.status = "FAILED";
-    job.errorMessage = errorMsg;
-    job.completedAt = new Date().toISOString();
+  const existingJob = db.jobs.get(jobId);
+  if (!existingJob) return;
 
-    // 2. Outbox event with eventType = 'job.failed'
+  // Guard: Completed job cannot be overwritten as failed by a late failure callback
+  if (existingJob.status === "COMPLETED" || existingJob.status === "COMPLETED_WITH_WARNINGS") {
+    return;
+  }
+
+  // Idempotency: If already FAILED, do not re-process
+  if (existingJob.status === "FAILED") {
+    return;
+  }
+
+  // Transition job status to FAILED
+  existingJob.status = "FAILED";
+  existingJob.errorMessage = errorMsg;
+  existingJob.completedAt = new Date().toISOString();
+
+  // Deduplicate outbox event
+  const alreadyOutboxed = db.outbox.some(
+    (e) => e.aggregateType === "GenerationJob" && e.aggregateId === jobId && e.eventType === "job.failed"
+  );
+
+  if (!alreadyOutboxed) {
     db.outbox.push({
       aggregateType: "GenerationJob",
       aggregateId: jobId,
@@ -29,22 +50,24 @@ test("Durable Failure Handling: Atomically transitions job to FAILED and creates
         jobId,
         error: errorMsg,
         status: "FAILED",
-        failedAt: job.completedAt,
+        failedAt: existingJob.completedAt,
       },
       status: "PENDING",
     });
-
-    // 3. Telemetry event
-    db.events.push({
-      jobId,
-      agentName: "supervisor",
-      eventType: "NODE_FAILED",
-      errorMessage: errorMsg,
-    });
   }
 
+  db.events.push({
+    jobId,
+    agentName: "supervisor",
+    eventType: "NODE_FAILED",
+    errorMessage: errorMsg,
+  });
+}
+
+test("Durable Failure Handling: Atomically transitions job to FAILED and creates job.failed outbox event", async () => {
+  const db = createMockDb();
   const errorMsg = "RESEARCH_AGENT_ERROR: Web search grounding quota exceeded.";
-  await handleJobFailure("job_123", errorMsg);
+  await handleJobFailure(db, "job_123", errorMsg);
 
   const updatedJob = db.jobs.get("job_123");
   assert.strictEqual(updatedJob.status, "FAILED");
@@ -64,42 +87,45 @@ test("Durable Failure Handling: Atomically transitions job to FAILED and creates
   assert.strictEqual(db.events[0].eventType, "NODE_FAILED");
 });
 
-test("Inngest onFailure Hook: Extracts original event data and invokes failure handler", async () => {
-  let capturedFailure = null;
+test("Durable Failure Handling: Idempotent under repeated or concurrent failure calls", async () => {
+  const db = createMockDb();
+  const errorMsg = "PLANNING_AGENT_ERROR: Connection reset by peer.";
 
-  async function mockOnFailure({ event, error }) {
-    const originalEvent = event.data?.event;
-    const jobId = originalEvent?.data?.jobId;
-    const errorMsg = error?.message || event.data?.error?.message || "Generation workflow execution failed.";
+  // First call
+  await handleJobFailure(db, "job_123", errorMsg);
+  // Second call (duplicate/retry)
+  await handleJobFailure(db, "job_123", errorMsg);
 
-    if (jobId) {
-      capturedFailure = { jobId, errorMsg };
-    }
-  }
+  // Exactly one outbox event and one telemetry event created
+  assert.strictEqual(db.outbox.length, 1);
+  assert.strictEqual(db.events.length, 1);
+  assert.strictEqual(db.jobs.get("job_123").status, "FAILED");
+});
 
-  const inngestFailureEvent = {
-    data: {
-      event: {
-        name: "devscribe/job.created",
-        data: {
-          jobId: "job_xyz_789",
-          threadId: "thread_456",
-          userId: "user_123",
-        },
-      },
-      error: {
-        name: "Error",
-        message: "CONTENT_WRITER_AGENT_ERROR: Gemini 503 Overloaded",
-      },
+test("Durable Failure Handling: Prevents late failure callback from overwriting completed jobs", async () => {
+  const db = createMockDb();
+
+  // Attempt late failure on COMPLETED job
+  await handleJobFailure(db, "job_completed", "LATE_ERROR: Worker timeout");
+  assert.strictEqual(db.jobs.get("job_completed").status, "COMPLETED");
+  assert.strictEqual(db.outbox.length, 0);
+
+  // Attempt late failure on COMPLETED_WITH_WARNINGS job
+  await handleJobFailure(db, "job_warnings", "LATE_ERROR: Worker timeout");
+  assert.strictEqual(db.jobs.get("job_warnings").status, "COMPLETED_WITH_WARNINGS");
+  assert.strictEqual(db.outbox.length, 0);
+});
+
+test("Durable Failure Handling: Re-throws persistence errors so Inngest can observe and retry", async () => {
+  const db = createMockDb();
+
+  await assert.rejects(
+    async () => {
+      await handleJobFailure(db, "job_123", "Some error", true);
     },
-  };
-
-  await mockOnFailure({
-    event: inngestFailureEvent,
-    error: new Error("CONTENT_WRITER_AGENT_ERROR: Gemini 503 Overloaded"),
-  });
-
-  assert.ok(capturedFailure);
-  assert.strictEqual(capturedFailure.jobId, "job_xyz_789");
-  assert.strictEqual(capturedFailure.errorMsg, "CONTENT_WRITER_AGENT_ERROR: Gemini 503 Overloaded");
+    {
+      name: "Error",
+      message: /DB_CONNECTION_TIMEOUT/,
+    }
+  );
 });

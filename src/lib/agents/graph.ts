@@ -23,13 +23,22 @@ async function codeValidationNode(state: ArticleStateType): Promise<Partial<Arti
 
 /**
  * Supervisor Routing Function: Evaluates Quality Review score and loop guard.
+ * Strictly requires a valid QualityReport with a numeric score.
  * Rules:
  * - Score >= 85 -> "finalize_completed"
  * - Score < 85 AND revisionCount < 2 -> "revise_draft" (increments revisionCount)
  * - Score < 85 AND revisionCount >= 2 -> "finalize_with_warnings"
  */
 function routeAfterReview(state: ArticleStateType): "writer" | "finalize" {
-  const score = state.qualityReport?.score ?? 85;
+  if (
+    state.qualityReport === null ||
+    state.qualityReport === undefined ||
+    typeof state.qualityReport.score !== "number"
+  ) {
+    throw new Error("QUALITY_ROUTING_ERROR: Cannot evaluate review routing without a valid numeric quality score.");
+  }
+
+  const score = state.qualityReport.score;
   const revisionCount = state.revisionCount ?? 0;
 
   console.log(`[Supervisor Router] Review score: ${score}/100, Revision count: ${revisionCount}/2`);
@@ -49,10 +58,19 @@ function routeAfterReview(state: ArticleStateType): "writer" | "finalize" {
 }
 
 /**
- * Finalization Node: sets terminal job status.
+ * Finalization Node: sets terminal job status based on evaluated score.
+ * Never defaults to successful score if qualityReport is missing.
  */
 async function finalizeNode(state: ArticleStateType): Promise<Partial<ArticleStateType>> {
-  const score = state.qualityReport?.score ?? 85;
+  if (
+    state.qualityReport === null ||
+    state.qualityReport === undefined ||
+    typeof state.qualityReport.score !== "number"
+  ) {
+    throw new Error("FINALIZATION_ERROR: Cannot finalize job without a valid numeric quality score.");
+  }
+
+  const score = state.qualityReport.score;
   const terminalStatus = score >= 85 ? "COMPLETED" : "COMPLETED_WITH_WARNINGS";
 
   return {

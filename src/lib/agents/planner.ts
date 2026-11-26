@@ -1,4 +1,4 @@
-import { ArticleStateType, StructuredOutline } from "./state";
+import { ArticleStateType, StructuredOutline, structuredOutlineSchema } from "./state";
 import { getAiClient, geminiConfig } from "../gemini/config";
 
 export const PLANNING_SYSTEM_PROMPT = `You are the Planning Agent for DevScribe AI, a technical pedagogy and curriculum architect.
@@ -37,6 +37,11 @@ Output must strictly conform to this JSON schema:
 
 export async function planningAgentNode(state: ArticleStateType): Promise<Partial<ArticleStateType>> {
   console.log(`[Planning Agent] Designing structured outline for topic: "${state.topic}"`);
+
+  if (!state.research || !state.research.findings?.trim()) {
+    throw new Error(`PLANNING_AGENT_ERROR: Cannot generate outline for topic '${state.topic}' without valid preceding research findings.`);
+  }
+
   const ai = getAiClient();
 
   const prompt = `Topic: ${state.topic}
@@ -49,7 +54,7 @@ Frameworks: ${state.frameworks.join(", ") || "N/A"}
 Additional Guidelines: ${state.additionalGuidelines || "None"}
 
 Research Findings Summary:
-${state.research?.findings || "Standard industry patterns"}
+${state.research.findings}
 
 Create the comprehensive structured outline JSON:`;
 
@@ -65,7 +70,24 @@ Create the comprehensive structured outline JSON:`;
       },
     });
 
-    const parsed: StructuredOutline = JSON.parse(response.text || "{}");
+    const rawText = response.text?.trim();
+    if (!rawText) {
+      throw new Error("Empty response received from LLM during outline planning.");
+    }
+
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(rawText);
+    } catch (parseErr: any) {
+      throw new Error(`LLM output was not valid JSON: ${parseErr.message}`);
+    }
+
+    const validation = structuredOutlineSchema.safeParse(parsedJson);
+    if (!validation.success) {
+      throw new Error(`Outline validation failed: ${JSON.stringify(validation.error.format())}`);
+    }
+
+    const parsed: StructuredOutline = validation.data;
 
     return {
       outline: parsed,
@@ -73,7 +95,7 @@ Create the comprehensive structured outline JSON:`;
     };
   } catch (err: any) {
     console.error("[Planning Agent] Error generating outline:", err);
-    // Propagate error to terminate workflow in failure rather than returning synthetic success
+    // Propagate error to terminate workflow in failure rather than returning synthetic success or empty outline
     throw new Error(`PLANNING_AGENT_ERROR: Failed to generate structured outline for topic '${state.topic}': ${err.message}`);
   }
 }
