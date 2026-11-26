@@ -14,7 +14,7 @@ A comprehensive autonomous hardening, correctness, and verification pass has bee
 ### Final Readiness Verdict:
 **`READY WITH DOCUMENTED EXTERNAL BLOCKERS`**
 
-All software engineering implementations, cryptographic routines, agent state machines, validation schemas, database models, anti-SSRF defenses, and build pipelines are 100% complete, fully implemented, strictly typed, linted, and verified by an automated test suite exercising actual production modules.
+All software engineering implementations, cryptographic routines, agent state machines, validation schemas, database models, anti-SSRF defenses, terminal job-state concurrency guards, genuine failure idempotency, Prisma migrations, and build pipelines are 100% complete, fully implemented, strictly typed, linted, and verified by an automated test suite exercising actual production modules.
 
 #### Documented External Blockers (Pre-requisites for live external deployment):
 1. **Live PostgreSQL / Supabase Database Cluster**: A live database URL (`DATABASE_URL`, `DIRECT_URL`, `CHECKPOINTER_DATABASE_URL`) with Supabase connection pooling (port 6543) and direct connection (port 5432) must be provisioned to run database migrations (`npx prisma migrate deploy`) and initialize the LangGraph `PostgresSaver` checkpointer tables.
@@ -29,73 +29,81 @@ All software engineering implementations, cryptographic routines, agent state ma
 |---|---|---|---|---|
 | **Prisma Schema Validation** | `npx prisma validate` | `0` | **PASS** | Validated `prisma/schema.prisma` with compound constraints and relational models. |
 | **Prisma Client Generation** | `npx prisma generate` | `0` | **PASS** | Generated `@prisma/client` v6.19.3. |
-| **Production Unit Test Suite** | `npm test` (`node --import ./tests/register.mjs --test tests/**/*.test.js`) | `0` | **PASS** | **40 / 40 tests passed** (0 failed, 0 skipped) across 10 test suites exercising real production modules. |
-| **Next.js Production Build** | `npm run build` | `0` | **PASS** | Compiled 15 application and API routes with zero compilation errors. |
+| **Production Unit Test Suite** | `npm test` (`node --import ./tests/register.mjs --test tests/**/*.test.js`) | `0` | **PASS** | **43 / 43 tests passed** (0 failed, 0 skipped) across 10 test suites exercising actual production modules. |
+| **Next.js Production Build** | `npm run build` | `0` | **PASS** | Compiled 15 application and API routes with zero compilation errors (27.4s). |
 | **ESLint Static Code Analysis** | `npm run lint` | `0` | **PASS** | Clean run with 0 warnings, 0 errors across all routes and components. |
 
 ---
 
 ## 3. Core Architectural Upgrades Implemented
 
-### 3.1 Authentication & Authorization (`src/lib/auth/`, `src/middleware.ts`)
+### 3.1 Terminal Job-State Concurrency & Genuine Failure Idempotency (`src/lib/inngest/functions/generationWorkflow.ts`)
+- **Mutual Exclusion Under Concurrent Execution**:
+  - In `handleJobFailure`: Transitions are guarded by atomic conditional update:
+    ```typescript
+    const updateResult = await tx.generationJob.updateMany({
+      where: {
+        id: jobId,
+        status: { notIn: ["COMPLETED", "COMPLETED_WITH_WARNINGS", "FAILED"] },
+      },
+      data: { status: "FAILED", errorMessage: errorMsg, completedAt: new Date() },
+    });
+    ```
+  - If `updateResult.count === 0`, the job is inspected. If current status is `COMPLETED` or `COMPLETED_WITH_WARNINGS`, the late failure is ignored and logged without modifying the job, outbox, or telemetry.
+  - In Step 3 (`persist-article-and-outbox`): The completion transition enforces the identical atomic conditional update predicate. If `updateResult.count === 0` (e.g. the job failed concurrently), the step immediately aborts without persisting an Article or creating a `job.completed` outbox event.
+  - **Late failure never overwrites a completed job, and late completion never overwrites a failed job.**
+- **Genuine Failure Idempotency & Safe Repair**:
+  - If `handleJobFailure` is called on a job that is already `FAILED`:
+    - Checks if the required `job.failed` outbox event exists.
+    - If missing (e.g. prior crash right after status update), safely creates the missing `job.failed` outbox event (catching Prisma `P2002`) and sets `shouldDispatchWebhooks = true`.
+    - **Strictly avoids inserting duplicate `NODE_FAILED` telemetry (`generationEvent`)**.
+- **Unswallowed Persistence Errors**:
+  - `prisma.$transaction` errors are never swallowed; exceptions are re-thrown so Inngest retry and failure recovery mechanisms observe them.
+
+### 3.2 Authentication & Authorization (`src/lib/auth/`, `src/middleware.ts`)
 - **Centralized Session & API Key Resolution**: Implemented `resolveUserAuth(req, requiredScope)` in `src/lib/auth/resolveAuth.ts`. All API routes independently authenticate requests; middleware alone is never trusted for authorization.
 - **Elimination of Fallbacks**: Removed all mock fallback identities (e.g. `prisma.user.findFirst()`). If credentials are missing or invalid, an explicit 401 Unauthorized (`ApiError`) is returned.
-- **Fail-Fast Supabase Configuration**: In `src/lib/supabase/client.ts` and `src/lib/supabase/server.ts`, an explicit `MISSING_SUPABASE_CONFIGURATION` exception is thrown if `NEXT_PUBLIC_SUPABASE_URL` or `NEXT_PUBLIC_SUPABASE_ANON_KEY` is missing in the environment.
-- **Strict Route Protection**: Configured `src/middleware.ts` to protect all `/dashboard/*` routes and redirect unauthenticated users to `/login?redirectedFrom=...`. Authenticated visitors accessing `/login` or `/signup` are redirected to `/dashboard`.
-- **API Key Security**: Plaintext API keys (`ds_live_<32 hex>`) are SHA-256 hashed on generation (`hashApiKey`). Only the hash is persisted. Keys support scoped access (`generate:write`, `generate:read`, `articles:read`, `webhooks:write`, `webhooks:read`).
+- **Strict Route Protection**: Configured `src/middleware.ts` to protect all `/dashboard/*` routes and redirect unauthenticated users to `/login`. Authenticated visitors accessing `/login` or `/signup` are redirected to `/dashboard`.
+- **API Key Security**: Plaintext API keys (`ds_live_<32 hex>`) are SHA-256 hashed on generation (`hashApiKey`). Only the hash is persisted. Keys support scoped access (`jobs:write`, `jobs:read`, `articles:read`, `webhooks:write`, `webhooks:read`).
 - **Strict User Ownership**: Enforced across API keys, jobs, articles, and webhook endpoints (`resource.userId === auth.userId`). Cross-tenant access attempts return 403 Forbidden.
 
-### 3.2 Dual Outbox Dispatcher Isolation (`src/lib/outbox/`, `src/lib/webhooks/`, `prisma/schema.prisma`)
+### 3.3 Dual Outbox Dispatcher Isolation & Prisma Migration Tracking (`src/lib/outbox/`, `src/lib/webhooks/`, `prisma/`)
 - **Inngest Dispatcher**: Dedicated worker processes *strictly* `job.created` events (`src/lib/outbox/inngestDispatcher.ts`). It is strictly prevented from consuming or modifying `job.completed` or `job.failed` events.
 - **Webhook Dispatcher**: Dedicated worker processes *strictly* `job.completed` and `job.failed` events (`src/lib/webhooks/dispatcher.ts`).
-- **Database-Level Deduplication Constraint**: Added `@@unique([aggregateId, eventType])` on `OutboxEvent` in `prisma/schema.prisma`. This guarantees at the database engine level that no job can ever persist duplicate terminal failure or completion outbox events.
-- **P2002 Idempotent Handling**: In `src/lib/inngest/functions/generationWorkflow.ts`, outbox event insertion catches Prisma code `P2002` (unique constraint violation) as an idempotent no-op during concurrent execution attempts.
+- **Database Unique Constraint**: Added `@@unique([aggregateId, eventType])` on `OutboxEvent` in `prisma/schema.prisma`.
+- **Version-Controlled Migrations**: Created initial migration in `prisma/migrations/20261126000000_init/migration.sql` containing `CREATE UNIQUE INDEX "outbox_events_aggregateId_eventType_key" ON "outbox_events"("aggregateId", "eventType");` and initialized `prisma/migrations/migration_lock.toml`. Removed `/prisma/migrations/` from `.gitignore` so migration history is tracked under Git.
 - **Delivery-Level Fencing**: Webhook deliveries utilize unique UUID claim tokens (`claimToken`), 45-second lease durations (`lease_expires_at > clock_timestamp()`), and atomic rollup.
 
-### 3.3 Anti-SSRF Socket Pinning & Webhook Cryptography (`src/lib/webhooks/`)
+### 3.4 Anti-SSRF Socket Pinning & Webhook Cryptography (`src/lib/webhooks/`)
 - **Multi-Address A/AAAA Resolution**: Webhook hostnames resolve all IPv4 and IPv6 addresses via `dns.promises.lookup(hostname, { all: true })`. If *any* resolved address belongs to a private, loopback, or cloud-metadata network, the entire hostname is rejected immediately.
-- **Universal Denylist**:
-  - Loopback: `127.0.0.0/8`, `::1`
-  - Private subnets: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`
-  - Carrier-Grade NAT: `100.64.0.0/10`
-  - Cloud Metadata / Link-Local: `169.254.0.0/16` (including `169.254.169.254`), `fe80::/10`
-  - Unique Local IPv6: `fc00::/7`
-  - IPv4-mapped IPv6: `::ffff:0:0/96`, `::ffff:127.0.0.1`
-  - Unroutable & Broadcast: `0.0.0.0/8`, `224.0.0.0/4`, `240.0.0.0/4`, `255.255.255.255`
-  - 6to4 & Documentation: `192.88.99.0/24`, `2002::/16`, `2001:db8::/32`
-- **Universal Denylist Guard in Production**: When `NODE_ENV === "production"`, `ALLOW_LOCAL_WEBHOOKS` is unconditionally ignored.
+- **Universal Denylist**: Loopback (`127.0.0.0/8`, `::1`), Private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), Carrier-Grade NAT (`100.64.0.0/10`), Cloud Metadata / Link-Local (`169.254.0.0/16`, `fe80::/10`), Unique Local IPv6 (`fc00::/7`), IPv4-mapped IPv6 (`::ffff:0:0/96`), Unroutable (`0.0.0.0/8`, `224.0.0.0/4`, `240.0.0.0/4`, `255.255.255.255`).
 - **Socket Pinning Resolver**: `createPinnedLookup(resolvedIp)` overrides the Node.js HTTP/HTTPS agent lookup function, connecting directly to the validated IP and completely eliminating TOCTOU / DNS rebinding vulnerabilities.
 - **SNI Preservation**: Sets `servername: parsedUrl.hostname` in TLS request options to preserve TLS certificate hostname validation.
-- **Redirect Prohibition**: Automatic redirect following is disabled; receiving a 3xx status code returns `SSRF_REDIRECT_PROHIBITED` to prevent redirect-based SSRF bypass.
+- **Redirect Prohibition**: Automatic redirect following is disabled; receiving a 3xx status code returns `SSRF_REDIRECT_PROHIBITED`.
 - **Cryptographic Security**: Secrets are encrypted at rest using AES-256-GCM (`WEBHOOK_ENCRYPTION_KEY`). Outbound dispatches include dual-secret rotation headers (`X-DevScribe-Signature` and `X-DevScribe-Signature-Next`), stable delivery IDs (`X-DevScribe-Delivery-Id`), and constant-time HMAC verification (`crypto.timingSafeEqual`) with a 300-second replay tolerance window.
-- **Resource Protection**: 5,000ms socket timeout and 4,096-byte response body cap.
 
-### 3.4 Multi-Agent State Machine & Validation Schemas (`src/lib/agents/`)
-- **Strict Zod Schemas**: Defined in `src/lib/agents/state.ts`:
-  - `researchDataSchema`: Requires substantive findings (min 20 characters) and library dependencies.
-  - `structuredOutlineSchema`: Requires section titles, target word counts, and descriptions.
-  - `qualityReportSchema`: Requires explicit scores across all 4 rubric dimensions (Technical Accuracy, Code Completeness, Pedagogy, SEO), critique, and boolean `revisionRequired`.
-- **Zero Fallback Toleration**: Removed all default scores (e.g. `score ?? 85`) and placeholder drafts. If the model fails schema validation, an explicit error is thrown, triggering Inngest's durable recovery or terminal failure handler.
+### 3.5 Multi-Agent State Machine & Validation Schemas (`src/lib/agents/`)
+- **Strict Zod Schemas**: Defined in `src/lib/agents/state.ts` for `researchDataSchema`, `structuredOutlineSchema`, and `qualityReportSchema`.
+- **Zero Fallback Toleration**: Removed all default scores and placeholder drafts. If the model fails schema validation, an explicit error is thrown, triggering Inngest's durable recovery or terminal failure handler.
 - **Supervisor Routing**: `routeAfterReview` strictly checks numeric `qualityReport.score`:
   - Score $\ge 85$: Routes to `finalize`.
-  - Score $< 85$ and `revisionCount < 2`: Routes to `writer` for targeted revision based on feedback.
-  - Score $< 85$ and `revisionCount >= 2`: Reaches loop guard cap and routes to `finalize` as `COMPLETED_WITH_WARNINGS`.
-- **Code Validation Security**: `src/lib/agents/codeValidator.ts` uses `@babel/parser` for JS/TS/JSX/TSX, native `JSON.parse` for JSON, and `yaml.parse` for YAML. Python, Go, Rust, and SQL undergo structural delimiter checks with explicit tag `validationType: "DELIMITER_CHECK_ONLY"`. **AI-generated code is NEVER executed on the host runtime!**
+  - Score $< 85$ and `revisionCount < 2`: Routes to `writer` for targeted revision.
+  - Score $< 85$ and `revisionCount >= 2`: Cap reached; routes to `finalize` as `COMPLETED_WITH_WARNINGS`.
+- **Code Validation Security**: `src/lib/agents/codeValidator.ts` uses `@babel/parser` for JS/TS/JSX/TSX, native `JSON.parse` for JSON, and `yaml.parse` for YAML. Python, Go, Rust, and SQL undergo structural delimiter checks (`validationType: "DELIMITER_CHECK_ONLY"`). **AI-generated code is NEVER executed on the host runtime.**
 
-### 3.5 PostgreSQL Checkpointer & TLS Security (`src/lib/agents/checkpointer.ts`)
+### 3.6 PostgreSQL Checkpointer & TLS Security (`src/lib/agents/checkpointer.ts`)
 - **Fail-Fast Error**: If database connection strings are absent, `getSafeCheckpointer()` throws `CHECKPOINTER_CONFIGURATION_ERROR`. Silent fallback to in-memory checkpointer is strictly prohibited.
 - **Strict Production TLS**: `getPoolSslConfig()` enforces `rejectUnauthorized: true` in production (`process.env.NODE_ENV === "production"`). Disabling certificate verification in production is forbidden.
 - **Custom Enterprise CA Support**: When `DATABASE_SSL_CERT` is provided, the CA certificate PEM is passed directly to the `pg.Pool` SSL configuration.
-
-### 3.6 Concurrency-Safe Idempotency Engine (`src/lib/idempotency/`)
-- **Deep Canonical JSON Serialization**: `canonicalJsonStringify()` recursively sorts object keys lexicographically and preserves array ordering, ensuring identical SHA-256 hashes for identical logical payloads regardless of key ordering. Rejects non-serializable top-level inputs (undefined, function, symbol).
-- **Atomic Reservation Fencing**: `processWithIdempotency()` acquires reservations with a unique UUID fencing token and evaluates lease validity using PostgreSQL wall-clock timestamp `clock_timestamp()`. Expired or un-owned transactions are safely rolled back without data corruption.
 
 ---
 
 ## 4. Test Suite Execution Summary
 
 The test runner executes against the actual production source modules via Node 24 module registration hooks (`tests/register.mjs` and `tests/loader.mjs`):
+
+> **Important Distinction on Database Concurrency Testing:**  
+> The tests in `tests/durableFailureHandling.test.js` execute against the **actual production `handleJobFailure` function** and step 3 completion logic using an in-memory transactional proxy (`prisma.$transaction`, `updateMany`, `findUnique`, `create`). They deterministically verify conditional query predicates, outbox deduplication, P2002 handling, repair logic, and state mutual exclusion. Live multi-threaded PostgreSQL race concurrency testing requires a live provisioned database cluster with connection pooling.
 
 ```bash
 > devscribe-ai@4.3.3 test
@@ -108,12 +116,12 @@ The test runner executes against the actual production source modules via Node 2
 ✔ Research Agent Validation (Production Schema): Rejects empty research findings
 ✔ Anti-SSRF (Production Module): Blocks loopback and private subnets
 ✔ Anti-SSRF (Production Module): Permits legitimate public Internet IP addresses
-✔ API Key Hashing (Production Module): SHA-256 hash generation is deterministic and unique
-✔ Authentication Enforcement: Unauthenticated requests are rejected with 401 without findFirst fallback
-✔ Resource Ownership Enforcement: Cross-user resource access is rejected with 403 Forbidden
-✔ Independent API Route Authorization: Does not rely on middleware alone
-✔ Cross-User Article Access: Query is scoped strictly by authenticated userId
-✔ Public Endpoints: Explicitly allow access without session
+✔ API Key Cryptographic Generation (Production Module): SHA-256 hash generation is deterministic and unique
+✔ API Key Authentication (Production Module): Rejects missing headers and malformed prefixes
+✔ API Key Authentication (Production Module): Enforces database status, revocation, expiration, and scopes
+✔ API Authorization Resolver (Production Module): resolveUserAuth authenticates valid API key requests
+✔ API Authorization Resolver (Production Module): resolveUserAuth rejects unauthenticated requests with 401 without findFirst fallback
+✔ Route Middleware Protection (Production Module): Dashboard routes redirect unauthenticated users to /login
 ✔ Canonical JSON (Production Module): Identical hash for scrambled key order
 ✔ Canonical JSON (Production Module): Preserves array ordering
 ✔ Canonical JSON (Production Module): Rejects undefined and non-serializable values
@@ -124,10 +132,13 @@ The test runner executes against the actual production source modules via Node 2
 ✔ AST Validator (Production Module): Validates YAML blocks with YAML_PARSE
 ✔ AST Validator (Production Module): Delimiter structural check on Python/Rust code (DELIMITER_CHECK_ONLY)
 ✔ AST Validator (Production Module): Full article markdown code block extraction and validation
-✔ Durable Failure Handling: Atomically transitions job to FAILED and creates job.failed outbox event
-✔ Durable Failure Handling: Idempotent under repeated or concurrent failure calls
-✔ Durable Failure Handling: Prevents late failure callback from overwriting completed jobs
-✔ Durable Failure Handling: Re-throws persistence errors so Inngest can observe and retry
+✔ Durable Failure Handling (Production Function): Atomically transitions active job to FAILED and creates outbox and telemetry
+✔ Durable Failure Handling (Production Function): Prevents late failure callback from overwriting completed jobs
+✔ Durable Failure Handling (Production Function): Idempotent when job is already FAILED and outbox exists
+✔ Durable Failure Handling (Production Function): Safely repairs missing failure outbox event without duplicate telemetry
+✔ Durable Failure Handling (Production Function): Completion-versus-failure concurrency race is mutually exclusive
+✔ Durable Failure Handling (Production Function): Concurrent failure calls race safely with duplicate outbox prevention
+✔ Durable Failure Handling (Production Function): Re-throws persistence errors so Inngest can observe and retry
 ✔ PostgreSQL TLS (Production Module): Production strictly requires rejectUnauthorized: true
 ✔ PostgreSQL TLS (Production Module): Production never permits rejectUnauthorized: false
 ✔ PostgreSQL TLS (Production Module): Production passes custom CA certificate when provided
@@ -142,11 +153,12 @@ The test runner executes against the actual production source modules via Node 2
 ✔ Webhook Crypto (Production Module): AES-256-GCM Encrypt & Decrypt Roundtrip
 ✔ Webhook Crypto (Production Module): Constant-Time HMAC Signature Verification
 
-ℹ tests 40
-ℹ pass 40
+ℹ tests 43
+ℹ pass 43
 ℹ fail 0
 ℹ cancelled 0
 ℹ skipped 0
+ℹ duration_ms 2508.8ms
 ```
 
 ---
@@ -155,12 +167,19 @@ The test runner executes against the actual production source modules via Node 2
 
 ### Next.js Production Build (`npm run build`)
 ```
-✔ Generated Prisma Client (v6.19.3) in 94ms
+> devscribe-ai@4.3.3 build
+> prisma generate && next build
+
+✔ Generated Prisma Client (v6.19.3) in 124ms
 ▲ Next.js 15.5.29
-✓ Compiled successfully in 8.6s
+- Environments: .env.local, .env
+Creating an optimized production build ...
+✓ Compiled successfully in 27.4s
 Linting and checking validity of types ...
+Collecting page data ...
 ✓ Generating static pages (15/15)
 Finalizing page optimization ...
+Collecting build traces ...
 
 Route (app)                                 Size  First Load JS
 ┌ ○ /                                      161 B         106 kB
@@ -186,6 +205,9 @@ Route (app)                                 Size  First Load JS
 ├ ○ /login                               2.12 kB         187 kB
 └ ○ /signup                              2.24 kB         187 kB
 + First Load JS shared by all             103 kB
+  ├ chunks/255-73938ce8a8eac1ad.js       46.6 kB
+  ├ chunks/4bd1b696-c023c6e3521b1417.js  54.2 kB
+  └ other shared chunks (total)          1.99 kB
 
 ƒ Middleware                             95.7 kB
 ```
@@ -205,7 +227,7 @@ Route (app)                                 Size  First Load JS
 The installed packages and lockfile have been verified against the approved v4.3.3 technology stack:
 - **Runtime Environment**: Node.js v24.11.1
 - **Next.js**: `15.5.29` (React 19.0.0, App Router, SSR, Middleware)
-- **Prisma & Client**: `6.19.3` (PostgreSQL with UUID mapping, compound unique constraints)
+- **Prisma & Client**: `6.19.3` (PostgreSQL with UUID mapping, compound unique constraints, tracked migrations)
 - **LangGraph & LangChain**: `@langchain/langgraph@1.7.5`, `@langchain/langgraph-checkpoint-postgres@1.1.2`, `@langchain/core@1.1.2`
 - **Google Gen AI**: `@google/genai@3.6.1`
 - **Inngest**: `3.31.0`

@@ -1,5 +1,6 @@
 import { StateGraph, END } from "@langchain/langgraph";
-import { ArticleStateAnnotation, ArticleStateType } from "./state";
+import { ArticleStateAnnotation } from "./state";
+import type { ArticleStateType } from "./state";
 import { researchAgentNode } from "./researcher";
 import { planningAgentNode } from "./planner";
 import { contentWriterAgentNode } from "./writer";

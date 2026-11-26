@@ -1,4 +1,5 @@
-import { ArticleStateType, ResearchData, researchDataSchema } from "./state";
+import { researchDataSchema } from "./state";
+import type { ArticleStateType, ResearchData } from "./state";
 import { getAiClient, geminiConfig } from "../gemini/config";
 import { executeSearch } from "../gemini/search";
 

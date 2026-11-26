@@ -1,4 +1,5 @@
-import { ArticleStateType, StructuredOutline, structuredOutlineSchema } from "./state";
+import { structuredOutlineSchema } from "./state";
+import type { ArticleStateType, StructuredOutline } from "./state";
 import { getAiClient, geminiConfig } from "../gemini/config";
 
 export const PLANNING_SYSTEM_PROMPT = `You are the Planning Agent for DevScribe AI, a technical pedagogy and curriculum architect.

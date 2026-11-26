@@ -1,5 +1,5 @@
 import prisma from "@/lib/prisma";
-import { WebhookDelivery, WebhookDeliveryStatus } from "@prisma/client";
+import { type WebhookDelivery, WebhookDeliveryStatus } from "@prisma/client";
 import { sendWebhookHttp } from "./httpClient";
 
 /**

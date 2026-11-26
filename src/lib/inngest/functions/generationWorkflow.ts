@@ -11,32 +11,17 @@ import { processPendingWebhookDeliveries } from "@/lib/webhooks/dispatcher";
  * Does not swallow persistence errors so Inngest retry/recovery can observe them.
  */
 export async function handleJobFailure(jobId: string, errorMsg: string) {
+  let shouldDispatchWebhooks = false;
+
   await prisma.$transaction(async (tx) => {
-    // 1. Fetch current job state
-    const existingJob = await tx.generationJob.findUnique({
-      where: { id: jobId },
-    });
-
-    if (!existingJob) {
-      console.warn(`[Inngest Failure Handler] Job ${jobId} not found, skipping failure persistence.`);
-      return;
-    }
-
-    // Guard: completed job MUST NOT be overwritten as FAILED by late failure callback
-    if (existingJob.status === "COMPLETED" || existingJob.status === "COMPLETED_WITH_WARNINGS") {
-      console.warn(`[Inngest Failure Handler] Ignored late failure callback for already completed job ${jobId}.`);
-      return;
-    }
-
-    // Idempotency: if already FAILED, ensure outbox event exists but avoid duplicate telemetry
-    if (existingJob.status === "FAILED") {
-      console.log(`[Inngest Failure Handler] Job ${jobId} is already in FAILED state.`);
-      return;
-    }
-
-    // 2. Transition GenerationJob to terminal FAILED state
-    await tx.generationJob.update({
-      where: { id: jobId },
+    // 1. Atomic conditional update: only transition if not already terminal (COMPLETED, COMPLETED_WITH_WARNINGS, FAILED)
+    const updateResult = await tx.generationJob.updateMany({
+      where: {
+        id: jobId,
+        status: {
+          notIn: ["COMPLETED", "COMPLETED_WITH_WARNINGS", "FAILED"],
+        },
+      },
       data: {
         status: "FAILED",
         errorMessage: errorMsg,
@@ -44,7 +29,64 @@ export async function handleJobFailure(jobId: string, errorMsg: string) {
       },
     });
 
-    // 3. Atomically insert deduplicated Webhook OutboxEvent
+    if (updateResult.count === 0) {
+      // Job was not updated; inspect current state
+      const existingJob = await tx.generationJob.findUnique({
+        where: { id: jobId },
+      });
+
+      if (!existingJob) {
+        console.warn(`[Inngest Failure Handler] Job ${jobId} not found, skipping failure persistence.`);
+        return;
+      }
+
+      // Guard: Late failure MUST NEVER overwrite an already completed job
+      if (existingJob.status === "COMPLETED" || existingJob.status === "COMPLETED_WITH_WARNINGS") {
+        console.warn(`[Inngest Failure Handler] Ignored late failure callback for already completed job ${jobId}.`);
+        return;
+      }
+
+      // Genuine idempotency: Job is already FAILED. Verify outbox event and repair if missing
+      if (existingJob.status === "FAILED") {
+        const existingOutbox = await tx.outboxEvent.findFirst({
+          where: {
+            aggregateType: "GenerationJob",
+            aggregateId: jobId,
+            eventType: "job.failed",
+          },
+        });
+
+        if (!existingOutbox) {
+          console.log(`[Inngest Failure Handler] Repairing missing job.failed outbox event for job ${jobId}.`);
+          try {
+            await tx.outboxEvent.create({
+              data: {
+                aggregateType: "GenerationJob",
+                aggregateId: jobId,
+                eventType: "job.failed",
+                payload: {
+                  jobId,
+                  error: existingJob.errorMessage || errorMsg,
+                  status: "FAILED",
+                  failedAt: (existingJob.completedAt || new Date()).toISOString(),
+                },
+                status: "PENDING",
+              },
+            });
+            shouldDispatchWebhooks = true;
+          } catch (err: any) {
+            if (err.code !== "P2002") {
+              throw err;
+            }
+          }
+        }
+        // Strictly avoid duplicate telemetry (NODE_FAILED generationEvent)
+        return;
+      }
+    }
+
+    // Successfully transitioned to FAILED
+    // 2. Atomically insert deduplicated Webhook OutboxEvent
     const existingOutbox = await tx.outboxEvent.findFirst({
       where: {
         aggregateType: "GenerationJob",
@@ -69,6 +111,7 @@ export async function handleJobFailure(jobId: string, errorMsg: string) {
             status: "PENDING",
           },
         });
+        shouldDispatchWebhooks = true;
       } catch (err: any) {
         if (err.code !== "P2002") {
           throw err;
@@ -76,7 +119,7 @@ export async function handleJobFailure(jobId: string, errorMsg: string) {
       }
     }
 
-    // 4. Atomically record NODE_FAILED generation event for telemetry
+    // 3. Atomically record NODE_FAILED generation event for telemetry
     await tx.generationEvent.create({
       data: {
         jobId,
@@ -86,11 +129,14 @@ export async function handleJobFailure(jobId: string, errorMsg: string) {
         stateSnapshot: { stage: "WORKFLOW_FAILED" },
       },
     });
+    shouldDispatchWebhooks = true;
   });
 
-  // 5. Trigger Webhook Dispatcher to notify subscribers immediately (strictly job.completed / job.failed)
-  const workerId = `inngest-failure-worker-${Date.now()}`;
-  await processPendingWebhookDeliveries(workerId);
+  // 4. Trigger Webhook Dispatcher if outbox event was created or repaired
+  if (shouldDispatchWebhooks) {
+    const workerId = `inngest-failure-worker-${Date.now()}`;
+    await processPendingWebhookDeliveries(workerId);
+  }
 }
 
 export const generationWorkflow = inngest.createFunction(
@@ -204,15 +250,14 @@ export const generationWorkflow = inngest.createFunction(
       const slug = `${slugBase}-${job.id.slice(0, 8)}`;
 
       await prisma.$transaction(async (tx) => {
-        // Guard against late persist on already-terminal job
-        const currentJob = await tx.generationJob.findUnique({ where: { id: jobId } });
-        if (currentJob?.status === "COMPLETED" || currentJob?.status === "COMPLETED_WITH_WARNINGS") {
-          return;
-        }
-
-        // 1. Update GenerationJob to terminal state
-        await tx.generationJob.update({
-          where: { id: jobId },
+        // Atomic conditional transition: only transition if not already terminal (COMPLETED, COMPLETED_WITH_WARNINGS, FAILED)
+        const updateResult = await tx.generationJob.updateMany({
+          where: {
+            id: jobId,
+            status: {
+              notIn: ["COMPLETED", "COMPLETED_WITH_WARNINGS", "FAILED"],
+            },
+          },
           data: {
             status: terminalStatus,
             progress: 100,
@@ -220,6 +265,15 @@ export const generationWorkflow = inngest.createFunction(
             completedAt: new Date(),
           },
         });
+
+        if (updateResult.count === 0) {
+          // Late completion: Job is already FAILED, or already COMPLETED by another execution.
+          // A late completion must NEVER overwrite a failed job!
+          console.warn(
+            `[Inngest Generation Workflow] Ignored late completion for job ${jobId}; job is already terminal.`
+          );
+          return;
+        }
 
         // 2. Insert Article
         const article = await tx.article.create({

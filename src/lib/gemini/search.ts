@@ -1,4 +1,4 @@
-import { GroundingSource } from "../agents/state";
+import type { GroundingSource } from "../agents/state";
 
 export interface SearchQueryResult {
   sources: GroundingSource[];

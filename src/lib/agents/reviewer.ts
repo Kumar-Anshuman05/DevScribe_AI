@@ -1,4 +1,5 @@
-import { ArticleStateType, QualityReport, qualityReportSchema } from "./state";
+import { qualityReportSchema } from "./state";
+import type { ArticleStateType, QualityReport } from "./state";
 import { getAiClient, geminiConfig } from "../gemini/config";
 
 export const REVIEWER_SYSTEM_PROMPT = `You are the Lead Technical Reviewer and Quality Auditor for DevScribe AI.

@@ -1,6 +1,6 @@
 import prisma from "@/lib/prisma";
 import { inngest } from "@/lib/inngest/client";
-import { OutboxEvent } from "@prisma/client";
+import type { OutboxEvent } from "@prisma/client";
 
 /**
  * Inngest Outbox Dispatcher
@@ -70,7 +70,7 @@ export async function processPendingInngestEvents(workerId: string): Promise<num
         WHERE id = ${event.id}::uuid
           AND event_type = 'job.created'
           AND locked_by = ${workerId}
-      `.catch(() => {});
+      `.catch(() => { });
     }
   }
 

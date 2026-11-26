@@ -7,6 +7,14 @@ const rootDir = process.cwd();
 export async function resolve(specifier, context, nextResolve) {
   let resolvedSpecifier = specifier;
 
+  // Handle Next.js subpath imports
+  if (specifier.startsWith("next/")) {
+    const subpath = specifier.slice("next/".length);
+    if (!subpath.endsWith(".js")) {
+      return nextResolve(`next/${subpath}.js`, context);
+    }
+  }
+
   // Handle '@/...' alias
   if (specifier.startsWith("@/")) {
     resolvedSpecifier = path.join(rootDir, "src", specifier.slice(2));

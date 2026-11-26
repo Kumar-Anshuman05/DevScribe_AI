@@ -1,4 +1,4 @@
-import { ArticleStateType } from "./state";
+import type { ArticleStateType } from "./state";
 import { getAiClient, geminiConfig } from "../gemini/config";
 
 export const WRITER_SYSTEM_PROMPT = `You are the Content Writer Agent for DevScribe AI, an elite software engineering author.
@@ -24,9 +24,9 @@ export async function contentWriterAgentNode(state: ArticleStateType): Promise<P
   const isRevision = state.revisionCount > 0 && state.qualityReport?.actionableFeedback;
   const feedbackContext = isRevision
     ? `\nCRITICAL EDITORIAL REVISION FEEDBACK (Score: ${state.qualityReport?.score}/100):\n` +
-      `Critique: ${state.qualityReport?.critique}\n` +
-      `Required Fixes:\n${(state.qualityReport?.actionableFeedback || []).map((f) => `- ${f}`).join("\n")}\n` +
-      `Code Syntax Issues:\n${(state.codeValidation?.syntaxErrors || []).map((e) => `- ${e}`).join("\n")}\n`
+    `Critique: ${state.qualityReport?.critique}\n` +
+    `Required Fixes:\n${(state.qualityReport?.actionableFeedback || []).map((f) => `- ${f}`).join("\n")}\n` +
+    `Code Syntax Issues:\n${(state.codeValidation?.syntaxErrors || []).map((e) => `- ${e}`).join("\n")}\n`
     : "";
 
   const prompt = `Topic: ${state.topic}
