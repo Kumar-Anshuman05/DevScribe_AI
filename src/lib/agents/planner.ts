@@ -1,6 +1,6 @@
 import { structuredOutlineSchema } from "./state";
 import type { ArticleStateType, StructuredOutline } from "./state";
-import { getAiClient, geminiConfig } from "../gemini/config";
+import { callGroqJson, groqConfig } from "../groq/config";
 
 export const PLANNING_SYSTEM_PROMPT = `You are the Planning Agent for DevScribe AI, a technical pedagogy and curriculum architect.
 Your mission is to design a publication-grade outline for technical articles and programming tutorials.
@@ -12,12 +12,7 @@ Guidelines:
    - Step-by-Step Implementation with granular code explanations
    - Verification, Edge Cases & Testing
    - Summary & Further Learning
-2. For BLOG: Structure must be analytical and conceptual:
-   - Executive Overview & Problem Context
-   - Technical Deep Dive / Core Mechanics
-   - Trade-off Analysis & Production Considerations
-   - Real-World Case Studies / Patterns
-   - Future Outlook & Architectural Recommendations
+3. Keep section descriptions concise (1-2 sentences per section). Provide between 3 to 5 core sections.
 
 Output must strictly conform to this JSON schema:
 {
@@ -37,13 +32,12 @@ Output must strictly conform to this JSON schema:
 }`;
 
 export async function planningAgentNode(state: ArticleStateType): Promise<Partial<ArticleStateType>> {
-  console.log(`[Planning Agent] Designing structured outline for topic: "${state.topic}"`);
+  const startedAt = Date.now();
+  console.log(`[Planning Agent] START jobId=${state.jobId} topic="${state.topic}" model=${groqConfig.fastModel}`);
 
   if (!state.research || !state.research.findings?.trim()) {
     throw new Error(`PLANNING_AGENT_ERROR: Cannot generate outline for topic '${state.topic}' without valid preceding research findings.`);
   }
-
-  const ai = getAiClient();
 
   const prompt = `Topic: ${state.topic}
 Content Type: ${state.contentType}
@@ -60,28 +54,14 @@ ${state.research.findings}
 Create the comprehensive structured outline JSON:`;
 
   try {
-    const response = await ai.models.generateContent({
-      model: geminiConfig.fastModel,
-      contents: [
-        { role: "user", parts: [{ text: `${PLANNING_SYSTEM_PROMPT}\n\n${prompt}` }] },
-      ],
-      config: {
-        temperature: 0.3,
-        responseMimeType: "application/json",
-      },
+    const parsedJson = await callGroqJson({
+      model: groqConfig.fastModel,
+      systemPrompt: PLANNING_SYSTEM_PROMPT,
+      userPrompt: prompt,
+      temperature: 0.3,
+      maxTokens: 2500,
+      requestName: "planning_agent",
     });
-
-    const rawText = response.text?.trim();
-    if (!rawText) {
-      throw new Error("Empty response received from LLM during outline planning.");
-    }
-
-    let parsedJson: unknown;
-    try {
-      parsedJson = JSON.parse(rawText);
-    } catch (parseErr: any) {
-      throw new Error(`LLM output was not valid JSON: ${parseErr.message}`);
-    }
 
     const validation = structuredOutlineSchema.safeParse(parsedJson);
     if (!validation.success) {
@@ -90,13 +70,16 @@ Create the comprehensive structured outline JSON:`;
 
     const parsed: StructuredOutline = validation.data;
 
+    console.log(
+      `[Planning Agent] COMPLETE jobId=${state.jobId} durationMs=${Date.now() - startedAt} sections=${parsed.sections.length}`
+    );
+
     return {
       outline: parsed,
       status: "WRITING",
     };
   } catch (err: any) {
-    console.error("[Planning Agent] Error generating outline:", err);
-    // Propagate error to terminate workflow in failure rather than returning synthetic success or empty outline
+    console.error(`[Planning Agent] ERROR jobId=${state.jobId} durationMs=${Date.now() - startedAt}:`, err);
     throw new Error(`PLANNING_AGENT_ERROR: Failed to generate structured outline for topic '${state.topic}': ${err.message}`);
   }
 }

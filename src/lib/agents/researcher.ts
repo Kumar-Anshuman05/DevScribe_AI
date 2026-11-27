@@ -1,7 +1,7 @@
 import { researchDataSchema } from "./state";
 import type { ArticleStateType, ResearchData } from "./state";
-import { getAiClient, geminiConfig } from "../gemini/config";
-import { executeSearch } from "../gemini/search";
+import { callGroqJson, groqConfig } from "../groq/config";
+import { executeSearch } from "../search/search";
 
 export const RESEARCH_SYSTEM_PROMPT = `You are the Research Agent for DevScribe AI, an elite technical content platform.
 Your objective is to conduct in-depth technical research on the requested topic.
@@ -14,24 +14,25 @@ Your goals:
 1. Identify the modern ecosystem status, official documentation links, and current best practices.
 2. Verify package names, versions, and API conventions for the target language and frameworks.
 3. Formulate key architectural takeaways and common pitfalls developers face.
+4. Output brevity is essential: findings MUST be a concise, structured summary under 300 words. Do NOT write full tutorials, code blocks, or ASCII diagrams.
 
 Output your response strictly in valid JSON format:
 {
-  "findings": "Detailed markdown analysis of technical requirements, architecture, and current conventions.",
+  "findings": "Concise bullet-point summary of key technical facts and architectural takeaways.",
   "libraries": [
     { "name": "package-name", "version": "^1.0.0", "docsUrl": "https://..." }
   ]
 }`;
 
 export async function researchAgentNode(state: ArticleStateType): Promise<Partial<ArticleStateType>> {
-  console.log(`[Research Agent] Starting research for topic: "${state.topic}"`);
-  const ai = getAiClient();
+  const startedAt = Date.now();
+  console.log(`[Research Agent] START jobId=${state.jobId} topic="${state.topic}" model=${groqConfig.fastModel}`);
 
-  // Step 1: Perform web search / grounding retrieval
+  // Step 1: Perform independent web search / grounding retrieval (DuckDuckGo / Tavily)
   const searchQuery = `${state.topic} ${state.primaryLanguage || ""} ${state.frameworks.join(" ")} documentation best practices`;
-  const searchResult = await executeSearch(searchQuery, geminiConfig.searchProvider);
+  const searchResult = await executeSearch(searchQuery, groqConfig.searchProvider);
 
-  // Step 2: Query Gemini with grounding context
+  // Step 2: Query Groq with grounding context
   const prompt = `Research Topic: ${state.topic}
 Content Type: ${state.contentType}
 Target Audience: ${state.targetAudience}
@@ -45,27 +46,31 @@ ${searchResult.findingsSummary}
 Conduct technical research and return the JSON object:`;
 
   try {
-    const response = await ai.models.generateContent({
-      model: geminiConfig.fastModel,
-      contents: [
-        { role: "user", parts: [{ text: `${RESEARCH_SYSTEM_PROMPT}\n\n${prompt}` }] },
-      ],
-      config: {
-        temperature: 0.2,
-        responseMimeType: "application/json",
-      },
+    const parsedJson = await callGroqJson({
+      model: groqConfig.fastModel,
+      systemPrompt: RESEARCH_SYSTEM_PROMPT,
+      userPrompt: prompt,
+      temperature: 0.2,
+      maxTokens: 2500,
+      requestName: "research_agent",
     });
 
-    const rawText = response.text?.trim();
-    if (!rawText) {
-      throw new Error("Empty response received from LLM during research generation.");
+    // Flexible normalization for LLM variations
+    if (parsedJson && Array.isArray(parsedJson.findings)) {
+      parsedJson.findings = parsedJson.findings.join("\n\n");
     }
-
-    let parsedJson: unknown;
-    try {
-      parsedJson = JSON.parse(rawText);
-    } catch (parseErr: any) {
-      throw new Error(`LLM output was not valid JSON: ${parseErr.message}`);
+    if (parsedJson && Array.isArray(parsedJson.libraries)) {
+      parsedJson.libraries = parsedJson.libraries.map((lib: any) => {
+        if (typeof lib === "string") {
+          return { name: lib, version: "latest" };
+        }
+        return lib;
+      });
+    } else if (parsedJson && parsedJson.libraries && typeof parsedJson.libraries === "object") {
+      parsedJson.libraries = Object.entries(parsedJson.libraries).map(([name, ver]) => ({
+        name,
+        version: String(ver),
+      }));
     }
 
     const validation = researchDataSchema.safeParse(parsedJson);
@@ -79,13 +84,16 @@ Conduct technical research and return the JSON object:`;
       sources: searchResult.sources,
     };
 
+    console.log(
+      `[Research Agent] COMPLETE jobId=${state.jobId} durationMs=${Date.now() - startedAt} libraries=${researchData.libraries.length} sources=${researchData.sources.length}`
+    );
+
     return {
       research: researchData,
       status: "PLANNING",
     };
   } catch (err: any) {
-    console.error("[Research Agent] Error generating research:", err);
-    // Propagate error to terminate workflow in failure rather than returning synthetic success or empty state
+    console.error(`[Research Agent] ERROR jobId=${state.jobId} durationMs=${Date.now() - startedAt}:`, err);
     throw new Error(`RESEARCH_AGENT_ERROR: Failed during technical research phase for topic '${state.topic}': ${err.message}`);
   }
 }

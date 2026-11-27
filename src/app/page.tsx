@@ -44,7 +44,7 @@ export default function HomePage() {
         <div className="container mx-auto px-4 max-w-6xl">
           <div className="text-center mb-12">
             <h2 className="text-2xl md:text-3xl font-bold tracking-tight">The 5-Stage Agentic Intelligence Pipeline</h2>
-            <p className="text-muted-foreground mt-2 text-sm">Stateful cyclic orchestration governed by LangGraph.js and Gemini 2.5 Flash</p>
+            <p className="text-muted-foreground mt-2 text-sm">Stateful cyclic orchestration governed by LangGraph.js and Groq LPU Inference</p>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-5 gap-4">

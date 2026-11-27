@@ -12,13 +12,13 @@ const envSchema = z.object({
   NEXT_PUBLIC_SUPABASE_ANON_KEY: z.string().optional(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().optional(),
 
-  // Gemini API
-  GEMINI_API_KEY: z.string().min(1, "GEMINI_API_KEY is required"),
-  GEMINI_MODEL_FAST: z.string().default("gemini-3.8-flash"),
-  GEMINI_MODEL_REASONING: z.string().default("gemini-3.8-flash"),
+  // Groq API
+  GROQ_API_KEY: z.string().min(1, "GROQ_API_KEY is required"),
+  GROQ_MODEL_FAST: z.string().default("openai/gpt-oss-20b"),
+  GROQ_MODEL_REASONING: z.string().default("openai/gpt-oss-20b"),
 
   // Search & Grounding
-  RESEARCH_SEARCH_PROVIDER: z.enum(["gemini_grounding", "tavily", "duckduckgo"]).default("gemini_grounding"),
+  RESEARCH_SEARCH_PROVIDER: z.enum(["duckduckgo", "tavily"]).default("duckduckgo"),
   TAVILY_API_KEY: z.string().optional(),
 
   // Inngest
@@ -49,7 +49,7 @@ export function getEnv(): Env {
       validatedEnv = envSchema.parse({
         ...process.env,
         DATABASE_URL: process.env.DATABASE_URL || "postgresql://mock:mock@localhost:5432/mock",
-        GEMINI_API_KEY: process.env.GEMINI_API_KEY || "mock-gemini-key",
+        GROQ_API_KEY: process.env.GROQ_API_KEY || "mock-groq-key",
       });
     } else {
       validatedEnv = result.data;

@@ -2,19 +2,15 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import prisma from "@/lib/prisma";
 import { createClient } from "@/lib/supabase/server";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeHighlight from "rehype-highlight";
-import { Card, Badge, Button } from "@/components/ui";
+import { Card, Badge } from "@/components/ui";
+import { ArticleMarkdown } from "@/components/articles/ArticleMarkdown";
 import {
   BookOpen,
   Clock,
   Award,
   ArrowLeft,
-  CheckCircle2,
   ExternalLink,
   ShieldCheck,
-  FileText,
 } from "lucide-react";
 
 export const dynamic = "force-dynamic";
@@ -121,13 +117,11 @@ export default async function ArticleViewPage({
       </Card>
 
       {/* Markdown Content Reader */}
-      <Card className="p-8 prose dark:prose-invert max-w-none">
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          rehypePlugins={[rehypeHighlight]}
-        >
-          {article.contentMarkdown}
-        </ReactMarkdown>
+      <Card className="p-5 sm:p-8 lg:p-10">
+        <ArticleMarkdown
+          content={article.contentMarkdown}
+          articleTitle={article.title}
+        />
       </Card>
 
       {/* Grounding Citations */}

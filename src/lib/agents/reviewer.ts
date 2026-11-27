@@ -1,6 +1,6 @@
 import { qualityReportSchema } from "./state";
 import type { ArticleStateType, QualityReport } from "./state";
-import { getAiClient, geminiConfig } from "../gemini/config";
+import { callGroqJson, groqConfig } from "../groq/config";
 
 export const REVIEWER_SYSTEM_PROMPT = `You are the Lead Technical Reviewer and Quality Auditor for DevScribe AI.
 Your responsibility is to strictly evaluate the draft technical article against an enterprise 100-point quality rubric:
@@ -37,17 +37,25 @@ Output strictly as a valid JSON object matching this schema:
 }`;
 
 export async function qualityReviewerAgentNode(state: ArticleStateType): Promise<Partial<ArticleStateType>> {
-  console.log(`[Quality Reviewer Agent] Auditing draft for topic: "${state.topic}" (Revision: ${state.revisionCount})`);
+  const startedAt = Date.now();
+  console.log(
+    `[Quality Reviewer Agent] START jobId=${state.jobId} topic="${state.topic}" revision=${state.revisionCount} model=${groqConfig.reasoningModel}`
+  );
 
   if (!state.draftMarkdown || !state.draftMarkdown.trim()) {
     throw new Error(`QUALITY_REVIEWER_AGENT_ERROR: Cannot review empty draft for topic '${state.topic}'.`);
   }
 
-  const ai = getAiClient();
-
   const codeAuditInfo = state.codeValidation?.allValid
     ? "Automated Code Validation: ALL code snippets passed AST syntax parsing successfully."
     : `Automated Code Validation: Syntax errors detected in code blocks:\n${(state.codeValidation?.syntaxErrors || []).join("\n")}`;
+
+  // Bound draft payload to fit comfortably within Groq TPM limits alongside system prompt + maxTokens
+  const maxDraftChars = 16000;
+  const draftForAudit =
+    state.draftMarkdown.length > maxDraftChars
+      ? `${state.draftMarkdown.slice(0, maxDraftChars)}\n\n[Truncated for TPM limit check; total length ${state.draftMarkdown.length} chars]`
+      : state.draftMarkdown;
 
   const prompt = `Topic: ${state.topic}
 Content Type: ${state.contentType}
@@ -58,33 +66,19 @@ Frameworks: ${state.frameworks.join(", ") || "None"}
 ${codeAuditInfo}
 
 Draft Article Markdown:
-${state.draftMarkdown}
+${draftForAudit}
 
 Evaluate the article against the 100-point rubric and output the JSON evaluation report:`;
 
   try {
-    const response = await ai.models.generateContent({
-      model: geminiConfig.reasoningModel,
-      contents: [
-        { role: "user", parts: [{ text: `${REVIEWER_SYSTEM_PROMPT}\n\n${prompt}` }] },
-      ],
-      config: {
-        temperature: 0.2,
-        responseMimeType: "application/json",
-      },
+    const parsedJson = await callGroqJson({
+      model: groqConfig.reasoningModel,
+      systemPrompt: REVIEWER_SYSTEM_PROMPT,
+      userPrompt: prompt,
+      temperature: 0.2,
+      maxTokens: 1500,
+      requestName: "quality_reviewer_agent",
     });
-
-    const rawText = response.text?.trim();
-    if (!rawText) {
-      throw new Error("Empty response received from LLM during quality audit.");
-    }
-
-    let parsedJson: unknown;
-    try {
-      parsedJson = JSON.parse(rawText);
-    } catch (parseErr: any) {
-      throw new Error(`LLM output was not valid JSON: ${parseErr.message}`);
-    }
 
     const validation = qualityReportSchema.safeParse(parsedJson);
     if (!validation.success) {
@@ -99,17 +93,20 @@ Evaluate the article against the 100-point rubric and output the JSON evaluation
       parsed.revisionRequired = true;
       parsed.actionableFeedback = [
         ...(parsed.actionableFeedback || []),
-        "Fix AST syntax errors identified during automated code parsing.",
+        "Fix syntax errors flagged by automated code validation.",
       ];
     }
+
+    console.log(
+      `[Quality Reviewer Agent] COMPLETE jobId=${state.jobId} durationMs=${Date.now() - startedAt} score=${parsed.score} revisionRequired=${parsed.revisionRequired}`
+    );
 
     return {
       qualityReport: parsed,
       status: "REVIEWING",
     };
   } catch (err: any) {
-    console.error("[Quality Reviewer Agent] Error auditing draft:", err);
-    // Propagate error to terminate workflow in failure rather than returning synthetic success or default score
-    throw new Error(`QUALITY_REVIEWER_AGENT_ERROR: Failed to perform quality audit for topic '${state.topic}': ${err.message}`);
+    console.error(`[Quality Reviewer Agent] ERROR jobId=${state.jobId} durationMs=${Date.now() - startedAt}:`, err);
+    throw new Error(`QUALITY_REVIEWER_AGENT_ERROR: Failed during quality audit for topic '${state.topic}': ${err.message}`);
   }
 }

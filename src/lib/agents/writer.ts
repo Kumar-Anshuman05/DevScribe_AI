@@ -1,5 +1,5 @@
 import type { ArticleStateType } from "./state";
-import { getAiClient, geminiConfig } from "../gemini/config";
+import { executeGroqCompletion, groqConfig } from "../groq/config";
 
 export const WRITER_SYSTEM_PROMPT = `You are the Content Writer Agent for DevScribe AI, an elite software engineering author.
 Your objective is to produce production-grade, publication-ready technical blog posts and step-by-step programming tutorials.
@@ -13,13 +13,14 @@ MANDATORY EDITORIAL STANDARDS:
 6. Diagrams: Where appropriate, embed Mermaid.js architecture diagrams using \`\`\`mermaid.`;
 
 export async function contentWriterAgentNode(state: ArticleStateType): Promise<Partial<ArticleStateType>> {
-  console.log(`[Content Writer Agent] Writing article draft for topic: "${state.topic}" (Revision: ${state.revisionCount})`);
+  const startedAt = Date.now();
+  console.log(
+    `[Content Writer Agent] START jobId=${state.jobId} topic="${state.topic}" revision=${state.revisionCount} model=${groqConfig.reasoningModel}`
+  );
 
   if (!state.outline || !state.outline.sections || state.outline.sections.length === 0) {
     throw new Error(`CONTENT_WRITER_AGENT_ERROR: Cannot write draft for topic '${state.topic}' without valid structured outline.`);
   }
-
-  const ai = getAiClient();
 
   const isRevision = state.revisionCount > 0 && state.qualityReport?.actionableFeedback;
   const feedbackContext = isRevision
@@ -48,30 +49,36 @@ ${feedbackContext}
 Write the complete, publication-grade markdown article now:`;
 
   try {
-    const response = await ai.models.generateContent({
-      model: geminiConfig.reasoningModel,
-      contents: [
-        { role: "user", parts: [{ text: `${WRITER_SYSTEM_PROMPT}\n\n${prompt}` }] },
-      ],
-      config: {
+    const completion = await executeGroqCompletion(
+      {
+        model: groqConfig.reasoningModel,
+        messages: [
+          { role: "system", content: WRITER_SYSTEM_PROMPT },
+          { role: "user", content: prompt },
+        ],
         temperature: 0.4,
+        max_tokens: 3200,
       },
-    });
+      { requestName: "content_writer_agent" }
+    );
 
-    const draftMarkdown = response.text?.trim();
+    const draftMarkdown = completion.choices[0]?.message?.content?.trim();
 
     // Reject empty, whitespace, or placeholder content
     if (!draftMarkdown || draftMarkdown.length < 100) {
       throw new Error(`Writer returned empty or insufficient content (length: ${draftMarkdown?.length ?? 0}).`);
     }
 
+    console.log(
+      `[Content Writer Agent] COMPLETE jobId=${state.jobId} durationMs=${Date.now() - startedAt} length=${draftMarkdown.length}`
+    );
+
     return {
       draftMarkdown,
       status: "VALIDATING_CODE",
     };
   } catch (err: any) {
-    console.error("[Content Writer Agent] Error generating draft:", err);
-    // Propagate error to terminate workflow in failure rather than returning synthetic placeholder text
+    console.error(`[Content Writer Agent] ERROR jobId=${state.jobId} durationMs=${Date.now() - startedAt}:`, err);
     throw new Error(`CONTENT_WRITER_AGENT_ERROR: Failed to generate technical draft for topic '${state.topic}': ${err.message}`);
   }
 }

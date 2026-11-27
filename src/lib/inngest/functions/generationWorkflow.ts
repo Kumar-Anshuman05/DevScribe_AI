@@ -130,8 +130,9 @@ export async function handleJobFailure(jobId: string, errorMsg: string) {
         stateSnapshot: { stage: "WORKFLOW_FAILED" },
       },
     });
+    // 4. Trigger Webhook Dispatcher if outbox event was created or repaired
     shouldDispatchWebhooks = true;
-  });
+  }, { maxWait: 15000, timeout: 30000 });
 
   // 4. Trigger Webhook Dispatcher if outbox event was created or repaired
   if (shouldDispatchWebhooks) {
@@ -145,7 +146,7 @@ export const generationWorkflow = inngest.createFunction(
     id: "generate-technical-article",
     name: "Generate Technical Article or Tutorial",
     concurrency: {
-      limit: 2, // Concurrency limit to prevent LLM quota exhaustion
+      limit: 1, // Serialize pipeline execution to respect Groq TPM quota
     },
     retries: 2,
     onFailure: async ({ event, error }) => {
@@ -354,7 +355,7 @@ export const generationWorkflow = inngest.createFunction(
             }
           }
         }
-      });
+      }, { maxWait: 15000, timeout: 30000 });
     });
 
     // Step 4: Trigger Outbound Webhook Delivery Dispatcher

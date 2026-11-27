@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { checkGeminiHealth } from "@/lib/gemini/health";
+import { checkGroqHealth } from "@/lib/groq/health";
 
 export const dynamic = "force-dynamic";
 
 /**
- * GET /api/v1/health — System Health & Gemini Probe Endpoint
+ * GET /api/v1/health — System Health & Groq Probe Endpoint
  */
 export async function GET() {
   const startTime = Date.now();
@@ -20,8 +20,8 @@ export async function GET() {
     dbStatus = `unhealthy: ${err.message}`;
   }
 
-  const geminiHealth = await checkGeminiHealth();
-  const overallHealthy = dbStatus === "healthy" && (geminiHealth.isHealthy || process.env.NODE_ENV !== "production");
+  const groqHealth = await checkGroqHealth();
+  const overallHealthy = dbStatus === "healthy" && (groqHealth.isHealthy || process.env.NODE_ENV !== "production");
 
   return NextResponse.json(
     {
@@ -33,11 +33,11 @@ export async function GET() {
           status: dbStatus,
           latencyMs: dbLatencyMs,
         },
-        geminiApi: {
-          status: geminiHealth.isHealthy ? "healthy" : "unhealthy",
-          latencyMs: geminiHealth.latencyMs,
-          model: geminiHealth.model,
-          error: geminiHealth.errorMessage,
+        groqApi: {
+          status: groqHealth.isHealthy ? "healthy" : "unhealthy",
+          latencyMs: groqHealth.latencyMs,
+          model: groqHealth.model,
+          error: groqHealth.errorMessage,
         },
       },
       durationMs: Date.now() - startTime,

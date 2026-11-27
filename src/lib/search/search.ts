@@ -18,20 +18,21 @@ export function wrapUntrustedContent(content: string, sourceUrl: string): string
 }
 
 /**
- * Grounding Search Engine with zero-cost fallback strategy:
- * 1. gemini_grounding (Native Google Search Tool via Gemini API)
- * 2. tavily (Free developer tier)
- * 3. duckduckgo (Zero-cost instant search fallback)
+ * Independent Search Engine with zero-cost DuckDuckGo and Tavily support:
+ * 1. tavily (if configured via TAVILY_API_KEY)
+ * 2. duckduckgo (Zero-cost instant search)
+ * 3. curated reference fallback
  */
-export async function executeSearch(query: string, searchProvider = "gemini_grounding"): Promise<SearchQueryResult> {
+export async function executeSearch(query: string, searchProvider = "duckduckgo"): Promise<SearchQueryResult> {
   const now = new Date().toISOString();
 
-  // Fallback 1: Tavily API (if configured)
+  // 1. Tavily API (if explicitly configured)
   if (searchProvider === "tavily" && process.env.TAVILY_API_KEY) {
     try {
       const response = await fetch("https://api.tavily.com/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(10_000),
         body: JSON.stringify({
           api_key: process.env.TAVILY_API_KEY,
           query,
@@ -56,16 +57,17 @@ export async function executeSearch(query: string, searchProvider = "gemini_grou
         return { sources, findingsSummary: wrappedFindings };
       }
     } catch (err) {
-      console.warn("⚠️ Tavily search failed, falling back to DuckDuckGo/static:", err);
+      console.warn("⚠️ Tavily search failed, falling back to DuckDuckGo/curated:", err);
     }
   }
 
-  // Fallback 2: DuckDuckGo Instant Answer / HTML Parser (Zero cost)
+  // 2. DuckDuckGo Instant Answer API (Zero cost, no API key required)
   if (searchProvider === "duckduckgo" || searchProvider === "tavily") {
     try {
       const ddgUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
       const response = await fetch(ddgUrl, {
         headers: { "User-Agent": "DevScribe-AI-Research-Agent/1.0" },
+        signal: AbortSignal.timeout(10_000),
       });
 
       if (response.ok) {
@@ -102,11 +104,11 @@ export async function executeSearch(query: string, searchProvider = "gemini_grou
         }
       }
     } catch (err) {
-      console.warn("⚠️ DuckDuckGo search fallback failed:", err);
+      console.warn("⚠️ DuckDuckGo search failed, using curated reference data:", err);
     }
   }
 
-  // Fallback 3: Standard curated reference data for programming languages and frameworks
+  // 3. Curated technical reference data for programming languages and frameworks
   const curatedSources: GroundingSource[] = [
     {
       title: "Official Developer Documentation & Best Practices",
