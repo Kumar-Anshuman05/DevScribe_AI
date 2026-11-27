@@ -1,4 +1,5 @@
 import { inngest } from "../client";
+import { NonRetriableError } from "inngest";
 import prisma from "@/lib/prisma";
 import { createDevScribeAgentGraph } from "@/lib/agents/graph";
 import { processPendingWebhookDeliveries } from "@/lib/webhooks/dispatcher";
@@ -160,7 +161,11 @@ export const generationWorkflow = inngest.createFunction(
   },
   { event: "devscribe/job.created" },
   async ({ event, step }) => {
-    const { jobId, threadId, userId } = event.data;
+    const { jobId, threadId, userId } = event.data || {};
+
+    if (!jobId) {
+      throw new NonRetriableError("Generation workflow aborted: Event payload is missing mandatory 'jobId'.");
+    }
 
     // Step 1: Verify Job & Update Status to RESEARCHING
     const job = await step.run("initialize-job-state", async () => {
@@ -169,7 +174,7 @@ export const generationWorkflow = inngest.createFunction(
       });
 
       if (!existingJob) {
-        throw new Error(`Job ${jobId} not found.`);
+        throw new NonRetriableError(`GenerationJob ${jobId} not found in database.`);
       }
 
       if (existingJob.status === "COMPLETED" || existingJob.status === "COMPLETED_WITH_WARNINGS") {
@@ -187,41 +192,61 @@ export const generationWorkflow = inngest.createFunction(
     });
 
     if (job.status === "COMPLETED" || job.status === "COMPLETED_WITH_WARNINGS") {
-      return { status: "ALREADY_COMPLETED", jobId };
+      return { status: "ALREADY_COMPLETED", jobId: job.id };
     }
 
     // Step 2: Execute LangGraph Multi-Agent Workflow
     const agentOutput = await step.run("execute-multi-agent-pipeline", async () => {
-      // Record NODE_STARTED generation event
-      await prisma.generationEvent.create({
-        data: {
-          jobId,
-          agentName: "supervisor",
-          eventType: "NODE_STARTED",
-          stateSnapshot: { stage: "PIPELINE_START" },
-        },
+      // Strictly verify that the parent GenerationJob still exists before recording telemetry
+      const currentJob = await prisma.generationJob.findUnique({
+        where: { id: job.id },
       });
+
+      if (!currentJob) {
+        throw new NonRetriableError(
+          `GenerationJob ${job.id} no longer exists in database. Aborting pipeline execution.`
+        );
+      }
+
+      // Record NODE_STARTED generation event with verified foreign key job.id
+      try {
+        await prisma.generationEvent.create({
+          data: {
+            jobId: job.id,
+            agentName: "supervisor",
+            eventType: "NODE_STARTED",
+            stateSnapshot: { stage: "PIPELINE_START" },
+          },
+        });
+      } catch (err: any) {
+        if (err.code === "P2003") {
+          throw new NonRetriableError(
+            `Foreign key constraint violated on generationEvent: Job ${job.id} does not exist in generation_jobs.`
+          );
+        }
+        throw err;
+      }
 
       const graph = await createDevScribeAgentGraph();
 
       const initialState = {
-        jobId,
-        threadId,
-        userId: job.userId,
-        topic: job.topic,
-        contentType: job.contentType,
-        targetAudience: job.targetAudience,
-        tone: job.tone,
-        targetWordCount: job.targetWordCount,
-        primaryLanguage: job.primaryLanguage,
-        frameworks: job.frameworks,
-        additionalGuidelines: job.additionalGuidelines,
+        jobId: job.id,
+        threadId: currentJob.threadId || threadId,
+        userId: currentJob.userId,
+        topic: currentJob.topic,
+        contentType: currentJob.contentType,
+        targetAudience: currentJob.targetAudience,
+        tone: currentJob.tone,
+        targetWordCount: currentJob.targetWordCount,
+        primaryLanguage: currentJob.primaryLanguage,
+        frameworks: currentJob.frameworks,
+        additionalGuidelines: currentJob.additionalGuidelines,
         revisionCount: 0,
         status: "RESEARCHING" as const,
       };
 
       const finalState = await graph.invoke(initialState, {
-        configurable: { thread_id: threadId },
+        configurable: { thread_id: currentJob.threadId || threadId },
       });
 
       return finalState;
@@ -253,7 +278,7 @@ export const generationWorkflow = inngest.createFunction(
         // Atomic conditional transition: only transition if not already terminal (COMPLETED, COMPLETED_WITH_WARNINGS, FAILED)
         const updateResult = await tx.generationJob.updateMany({
           where: {
-            id: jobId,
+            id: job.id,
             status: {
               notIn: ["COMPLETED", "COMPLETED_WITH_WARNINGS", "FAILED"],
             },
@@ -270,7 +295,7 @@ export const generationWorkflow = inngest.createFunction(
           // Late completion: Job is already FAILED, or already COMPLETED by another execution.
           // A late completion must NEVER overwrite a failed job!
           console.warn(
-            `[Inngest Generation Workflow] Ignored late completion for job ${jobId}; job is already terminal.`
+            `[Inngest Generation Workflow] Ignored late completion for job ${job.id}; job is already terminal.`
           );
           return;
         }
@@ -278,7 +303,7 @@ export const generationWorkflow = inngest.createFunction(
         // 2. Insert Article
         const article = await tx.article.create({
           data: {
-            jobId,
+            jobId: job.id,
             userId: job.userId,
             title: agentOutput.outline?.title || job.topic,
             slug,
@@ -298,7 +323,7 @@ export const generationWorkflow = inngest.createFunction(
         const existingOutbox = await tx.outboxEvent.findFirst({
           where: {
             aggregateType: "GenerationJob",
-            aggregateId: jobId,
+            aggregateId: job.id,
             eventType: "job.completed",
           },
         });
@@ -308,10 +333,10 @@ export const generationWorkflow = inngest.createFunction(
             await tx.outboxEvent.create({
               data: {
                 aggregateType: "GenerationJob",
-                aggregateId: jobId,
+                aggregateId: job.id,
                 eventType: "job.completed",
                 payload: {
-                  jobId,
+                  jobId: job.id,
                   articleId: article.id,
                   slug: article.slug,
                   title: article.title,
@@ -338,6 +363,6 @@ export const generationWorkflow = inngest.createFunction(
       await processPendingWebhookDeliveries(workerId);
     });
 
-    return { success: true, jobId, status: "COMPLETED" };
+    return { success: true, jobId: job.id, status: "COMPLETED" };
   }
 );
