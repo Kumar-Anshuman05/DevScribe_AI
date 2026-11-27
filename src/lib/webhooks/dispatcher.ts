@@ -49,14 +49,14 @@ export async function processPendingWebhookDeliveries(workerId: string): Promise
     for (const endpoint of endpoints) {
       await prisma.$executeRaw`
         INSERT INTO webhook_deliveries (
-          id, delivery_id, outbox_event_id, webhook_id, job_id, event_type, payload,
-          attempt_count, max_attempts, status, scheduled_at, created_at, updated_at
+          "id", "deliveryId", "outboxEventId", "webhookId", "jobId", "eventType", "payload",
+          "attemptCount", "maxAttempts", "status", "scheduledAt", "createdAt", "updatedAt"
         ) VALUES (
           gen_random_uuid(), gen_random_uuid(), ${event.id}::uuid, ${endpoint.id}::uuid,
           ${event.aggregateId}::uuid, ${event.eventType}, ${JSON.stringify(event.payload)}::jsonb,
           0, 3, 'PENDING', NOW(), NOW(), NOW()
         )
-        ON CONFLICT (outbox_event_id, webhook_id) DO NOTHING
+        ON CONFLICT ("outboxEventId", "webhookId") DO NOTHING
       `;
     }
 
@@ -74,16 +74,16 @@ export async function processPendingWebhookDeliveries(workerId: string): Promise
   // does not remain permanently stuck, allowing OutboxEvent to reach terminal FAILED.
   await prisma.$executeRaw`
     UPDATE webhook_deliveries
-    SET status = 'EXHAUSTED'::"WebhookDeliveryStatus",
-        claim_token = NULL,
-        locked_at = NULL,
-        locked_by = NULL,
-        lease_expires_at = NULL,
-        error_message = 'Worker crashed or timed out on final delivery attempt.',
-        updated_at = clock_timestamp()
-    WHERE status = 'IN_FLIGHT'
-      AND lease_expires_at < clock_timestamp()
-      AND attempt_count >= max_attempts
+    SET "status" = 'EXHAUSTED'::"WebhookDeliveryStatus",
+        "claimToken" = NULL,
+        "lockedAt" = NULL,
+        "lockedBy" = NULL,
+        "leaseExpiresAt" = NULL,
+        "errorMessage" = 'Worker crashed or timed out on final delivery attempt.',
+        "updatedAt" = clock_timestamp()
+    WHERE "status" = 'IN_FLIGHT'
+      AND "leaseExpiresAt" < clock_timestamp()
+      AND "attemptCount" >= "maxAttempts"
   `;
 
   // ---------------------------------------------------------------------------
@@ -98,23 +98,23 @@ export async function processPendingWebhookDeliveries(workerId: string): Promise
   // - Increments attempt_count atomically on claim.
   const claimedDeliveries = await prisma.$queryRaw<WebhookDelivery[]>`
     UPDATE webhook_deliveries
-    SET status = 'IN_FLIGHT',
-        claim_token = gen_random_uuid(),
-        locked_at = clock_timestamp(),
-        locked_by = ${workerId},
-        lease_expires_at = clock_timestamp() + INTERVAL '45 seconds',
-        attempt_count = attempt_count + 1,
-        attempted_at = clock_timestamp(),
-        updated_at = clock_timestamp()
+    SET "status" = 'IN_FLIGHT',
+        "claimToken" = gen_random_uuid(),
+        "lockedAt" = clock_timestamp(),
+        "lockedBy" = ${workerId},
+        "leaseExpiresAt" = clock_timestamp() + INTERVAL '45 seconds',
+        "attemptCount" = "attemptCount" + 1,
+        "attemptedAt" = clock_timestamp(),
+        "updatedAt" = clock_timestamp()
     WHERE id IN (
       SELECT id FROM webhook_deliveries
       WHERE (
-        status = 'PENDING'
-        OR (status = 'FAILED_RETRYABLE' AND (next_retry_at IS NULL OR next_retry_at <= clock_timestamp()))
-        OR (status = 'IN_FLIGHT' AND lease_expires_at < clock_timestamp())
+        "status" = 'PENDING'
+        OR ("status" = 'FAILED_RETRYABLE' AND ("nextRetryAt" IS NULL OR "nextRetryAt" <= clock_timestamp()))
+        OR ("status" = 'IN_FLIGHT' AND "leaseExpiresAt" < clock_timestamp())
       )
-      AND attempt_count < max_attempts
-      ORDER BY scheduled_at ASC
+      AND "attemptCount" < "maxAttempts"
+      ORDER BY "scheduledAt" ASC
       FOR UPDATE SKIP LOCKED
       LIMIT 10
     )
@@ -137,16 +137,16 @@ export async function processPendingWebhookDeliveries(workerId: string): Promise
       // with claim_token, locked_by, AND lease_expires_at > clock_timestamp()
       await prisma.$executeRaw`
         UPDATE webhook_deliveries
-        SET status = 'EXHAUSTED'::"WebhookDeliveryStatus",
-            claim_token = NULL,
-            locked_at = NULL,
-            locked_by = NULL,
-            lease_expires_at = NULL,
-            updated_at = clock_timestamp()
+        SET "status" = 'EXHAUSTED'::"WebhookDeliveryStatus",
+            "claimToken" = NULL,
+            "lockedAt" = NULL,
+            "lockedBy" = NULL,
+            "leaseExpiresAt" = NULL,
+            "updatedAt" = clock_timestamp()
         WHERE id = ${delivery.id}::uuid
-          AND claim_token = ${delivery.claimToken}::uuid
-          AND locked_by = ${workerId}
-          AND lease_expires_at > clock_timestamp()
+          AND "claimToken" = ${delivery.claimToken}::uuid
+          AND "lockedBy" = ${workerId}
+          AND "leaseExpiresAt" > clock_timestamp()
       `;
       continue;
     }
@@ -188,21 +188,21 @@ export async function processPendingWebhookDeliveries(workerId: string): Promise
     // this update touches 0 rows, preventing an expired worker from recording late results.
     await prisma.$executeRaw`
       UPDATE webhook_deliveries
-      SET status = ${newStatus}::"WebhookDeliveryStatus",
-          http_status = ${dispatchResult.httpStatus},
-          response_body = ${dispatchResult.responseBody?.slice(0, 4096) || null},
-          error_message = ${dispatchResult.errorMessage || null},
-          completed_at = ${isSuccess ? new Date() : null},
-          next_retry_at = ${nextRetry},
-          claim_token = NULL,
-          locked_at = NULL,
-          locked_by = NULL,
-          lease_expires_at = NULL,
-          updated_at = clock_timestamp()
+      SET "status" = ${newStatus}::"WebhookDeliveryStatus",
+          "httpStatus" = ${dispatchResult.httpStatus},
+          "responseBody" = ${dispatchResult.responseBody?.slice(0, 4096) || null},
+          "errorMessage" = ${dispatchResult.errorMessage || null},
+          "completedAt" = ${isSuccess ? new Date() : null},
+          "nextRetryAt" = ${nextRetry},
+          "claimToken" = NULL,
+          "lockedAt" = NULL,
+          "lockedBy" = NULL,
+          "leaseExpiresAt" = NULL,
+          "updatedAt" = clock_timestamp()
       WHERE id = ${delivery.id}::uuid
-        AND claim_token = ${delivery.claimToken}::uuid
-        AND locked_by = ${workerId}
-        AND lease_expires_at > clock_timestamp()
+        AND "claimToken" = ${delivery.claimToken}::uuid
+        AND "lockedBy" = ${workerId}
+        AND "leaseExpiresAt" > clock_timestamp()
     `;
   }
 
@@ -214,20 +214,20 @@ export async function processPendingWebhookDeliveries(workerId: string): Promise
   // modify or roll up Inngest 'job.created' outbox events!
   await prisma.$executeRaw`
     UPDATE outbox_events e
-    SET status = CASE
+    SET "status" = CASE
           WHEN NOT EXISTS (
             SELECT 1 FROM webhook_deliveries d
-            WHERE d.outbox_event_id = e.id AND d.status != 'SUCCESS'
+            WHERE d."outboxEventId" = e.id AND d."status" != 'SUCCESS'
           ) THEN 'DISPATCHED'::"OutboxStatus"
           ELSE 'FAILED'::"OutboxStatus"
         END,
-        dispatched_at = NOW()
-    WHERE e.status = 'PROCESSING'
-      AND e.event_type IN ('job.completed', 'job.failed')
+        "dispatchedAt" = NOW()
+    WHERE e."status" = 'PROCESSING'
+      AND e."eventType" IN ('job.completed', 'job.failed')
       AND NOT EXISTS (
         SELECT 1 FROM webhook_deliveries d
-        WHERE d.outbox_event_id = e.id
-          AND d.status IN ('PENDING', 'IN_FLIGHT', 'FAILED_RETRYABLE')
+        WHERE d."outboxEventId" = e.id
+          AND d."status" IN ('PENDING', 'IN_FLIGHT', 'FAILED_RETRYABLE')
       )
   `;
 

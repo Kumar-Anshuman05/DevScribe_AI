@@ -34,22 +34,22 @@ export async function processWithIdempotency<T>(
   // 2. Atomic reservation lease acquisition (90-second lease with new ownership token)
   const reservationResult = await prisma.$executeRaw`
     INSERT INTO idempotency_records (
-      id, user_id, key, request_hash, ownership_token, status, lease_expires_at, expires_at, created_at, updated_at
+      "id", "userId", "key", "requestHash", "ownershipToken", "status", "leaseExpiresAt", "expiresAt", "createdAt", "updatedAt"
     ) VALUES (
       gen_random_uuid(), ${userId}::uuid, ${key}, ${requestHash}, ${ownershipToken}::uuid, 'IN_PROGRESS', NOW() + INTERVAL '90 seconds', ${expiresAt}, NOW(), NOW()
     )
-    ON CONFLICT (user_id, key) DO UPDATE
-      SET status = 'IN_PROGRESS',
-          request_hash = EXCLUDED.request_hash,
-          ownership_token = EXCLUDED.ownership_token,
-          lease_expires_at = EXCLUDED.lease_expires_at,
-          expires_at = EXCLUDED.expires_at,
-          status_code = NULL,
-          response_body = NULL,
-          updated_at = NOW()
-      WHERE idempotency_records.expires_at < NOW()
-         OR (idempotency_records.status = 'FAILED' AND idempotency_records.request_hash = EXCLUDED.request_hash)
-         OR (idempotency_records.status = 'IN_PROGRESS' AND idempotency_records.lease_expires_at < NOW() AND idempotency_records.request_hash = EXCLUDED.request_hash)
+    ON CONFLICT ("userId", "key") DO UPDATE
+      SET "status" = 'IN_PROGRESS',
+          "requestHash" = EXCLUDED."requestHash",
+          "ownershipToken" = EXCLUDED."ownershipToken",
+          "leaseExpiresAt" = EXCLUDED."leaseExpiresAt",
+          "expiresAt" = EXCLUDED."expiresAt",
+          "statusCode" = NULL,
+          "responseBody" = NULL,
+          "updatedAt" = NOW()
+      WHERE idempotency_records."expiresAt" < NOW()
+         OR (idempotency_records."status" = 'FAILED' AND idempotency_records."requestHash" = EXCLUDED."requestHash")
+         OR (idempotency_records."status" = 'IN_PROGRESS' AND idempotency_records."leaseExpiresAt" < NOW() AND idempotency_records."requestHash" = EXCLUDED."requestHash")
   `;
 
   if (reservationResult === 0) {
@@ -92,14 +92,14 @@ export async function processWithIdempotency<T>(
       // Fenced Completion Update: Verify that ownershipToken STILL matches AND lease has not expired using wall-clock time!
       const rowsUpdated = await tx.$executeRaw`
         UPDATE idempotency_records
-        SET status = 'COMPLETED',
-            status_code = ${handlerResult.statusCode},
-            response_body = ${JSON.stringify(handlerResult.payload)}::jsonb,
-            updated_at = clock_timestamp()
-        WHERE user_id = ${userId}::uuid
-          AND key = ${key}
-          AND ownership_token = ${ownershipToken}::uuid
-          AND lease_expires_at > clock_timestamp()
+        SET "status" = 'COMPLETED',
+            "statusCode" = ${handlerResult.statusCode},
+            "responseBody" = ${JSON.stringify(handlerResult.payload)}::jsonb,
+            "updatedAt" = clock_timestamp()
+        WHERE "userId" = ${userId}::uuid
+          AND "key" = ${key}
+          AND "ownershipToken" = ${ownershipToken}::uuid
+          AND "leaseExpiresAt" > clock_timestamp()
       `;
 
       if (rowsUpdated === 0) {
@@ -115,12 +115,12 @@ export async function processWithIdempotency<T>(
     // Conditional Failure Transition: Only transition to FAILED if WE still hold the ownership token AND lease has not expired
     await prisma.$executeRaw`
       UPDATE idempotency_records
-      SET status = 'FAILED',
-          updated_at = clock_timestamp()
-      WHERE user_id = ${userId}::uuid
-        AND key = ${key}
-        AND ownership_token = ${ownershipToken}::uuid
-        AND lease_expires_at > clock_timestamp()
+      SET "status" = 'FAILED',
+          "updatedAt" = clock_timestamp()
+      WHERE "userId" = ${userId}::uuid
+        AND "key" = ${key}
+        AND "ownershipToken" = ${ownershipToken}::uuid
+        AND "leaseExpiresAt" > clock_timestamp()
     `.catch(() => {});
 
     throw error;

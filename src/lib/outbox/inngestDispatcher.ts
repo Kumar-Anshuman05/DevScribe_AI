@@ -11,16 +11,15 @@ export async function processPendingInngestEvents(workerId: string): Promise<num
   // Atomic claim of pending job.created events ONLY (SKIP LOCKED)
   const events = await prisma.$queryRaw<OutboxEvent[]>`
     UPDATE outbox_events
-    SET status = 'PROCESSING',
-        locked_at = clock_timestamp(),
-        locked_by = ${workerId},
-        lease_expires_at = clock_timestamp() + INTERVAL '60 seconds',
-        updated_at = clock_timestamp()
+    SET "status" = 'PROCESSING',
+        "lockedAt" = clock_timestamp(),
+        "lockedBy" = ${workerId},
+        "leaseExpiresAt" = clock_timestamp() + INTERVAL '60 seconds'
     WHERE id IN (
       SELECT id FROM outbox_events
-      WHERE status = 'PENDING'
-        AND event_type = 'job.created'
-      ORDER BY created_at ASC
+      WHERE "status" = 'PENDING'
+        AND "eventType" = 'job.created'
+      ORDER BY "createdAt" ASC
       FOR UPDATE SKIP LOCKED
       LIMIT 10
     )
@@ -40,16 +39,15 @@ export async function processPendingInngestEvents(workerId: string): Promise<num
       // Fenced completion update: strictly scoped to job.created and valid lease
       const result = await prisma.$executeRaw`
         UPDATE outbox_events
-        SET status = 'DISPATCHED',
-            dispatched_at = clock_timestamp(),
-            locked_at = NULL,
-            locked_by = NULL,
-            lease_expires_at = NULL,
-            updated_at = clock_timestamp()
+        SET "status" = 'DISPATCHED',
+            "dispatchedAt" = clock_timestamp(),
+            "lockedAt" = NULL,
+            "lockedBy" = NULL,
+            "leaseExpiresAt" = NULL
         WHERE id = ${event.id}::uuid
-          AND event_type = 'job.created'
-          AND locked_by = ${workerId}
-          AND lease_expires_at > clock_timestamp()
+          AND "eventType" = 'job.created'
+          AND "lockedBy" = ${workerId}
+          AND "leaseExpiresAt" > clock_timestamp()
       `;
 
       if (result > 0) {
@@ -60,16 +58,15 @@ export async function processPendingInngestEvents(workerId: string): Promise<num
       // Revert to PENDING on dispatch error for retry
       await prisma.$executeRaw`
         UPDATE outbox_events
-        SET status = 'PENDING',
-            retry_count = retry_count + 1,
-            error_message = ${err.message || "Failed to dispatch to Inngest"},
-            locked_at = NULL,
-            locked_by = NULL,
-            lease_expires_at = NULL,
-            updated_at = clock_timestamp()
+        SET "status" = 'PENDING',
+            "retryCount" = "retryCount" + 1,
+            "errorMessage" = ${err.message || "Failed to dispatch to Inngest"},
+            "lockedAt" = NULL,
+            "lockedBy" = NULL,
+            "leaseExpiresAt" = NULL
         WHERE id = ${event.id}::uuid
-          AND event_type = 'job.created'
-          AND locked_by = ${workerId}
+          AND "eventType" = 'job.created'
+          AND "lockedBy" = ${workerId}
       `.catch(() => { });
     }
   }
