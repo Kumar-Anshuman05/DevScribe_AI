@@ -14,8 +14,8 @@ const envSchema = z.object({
 
   // Gemini API
   GEMINI_API_KEY: z.string().min(1, "GEMINI_API_KEY is required"),
-  GEMINI_MODEL_FAST: z.string().default("gemini-2.5-flash"),
-  GEMINI_MODEL_REASONING: z.string().default("gemini-2.5-flash"),
+  GEMINI_MODEL_FAST: z.string().default("gemini-3.8-flash"),
+  GEMINI_MODEL_REASONING: z.string().default("gemini-3.8-flash"),
 
   // Search & Grounding
   RESEARCH_SEARCH_PROVIDER: z.enum(["gemini_grounding", "tavily", "duckduckgo"]).default("gemini_grounding"),
