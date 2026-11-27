@@ -8,14 +8,14 @@ export async function middleware(request: NextRequest) {
     },
   });
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const rawUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
   const isDashboardRoute = request.nextUrl.pathname.startsWith("/dashboard");
   const isAuthRoute =
     request.nextUrl.pathname === "/login" || request.nextUrl.pathname === "/signup";
 
-  if (!supabaseUrl || !supabaseAnonKey) {
+  if (!rawUrl || !supabaseAnonKey) {
     if (isDashboardRoute) {
       const redirectUrl = new URL("/login", request.url);
       redirectUrl.searchParams.set("error", "missing_supabase_configuration");
@@ -23,6 +23,9 @@ export async function middleware(request: NextRequest) {
     }
     return response;
   }
+
+  // Normalize URL to remove trailing /rest/v1 or trailing slash
+  const supabaseUrl = rawUrl.replace(/\/rest\/v1\/?$/, "").replace(/\/+$/, "");
 
   const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {
     cookies: {
